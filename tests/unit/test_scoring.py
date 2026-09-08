@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 
 from app.domain.enums import SubmissionStatus
+from app.domain.round.service import display_ranks
 from app.domain.scoring.service import (
     ParticipantTotals,
     RoundSubmission,
@@ -292,3 +293,36 @@ def test_reactions_never_change_scores_or_ranking():
     assert score_round(submissions) == outcome
     assert final_ranking(loved) == final_ranking(quiet)
     assert most_loved(loved) is not None and most_loved(quiet) is None
+
+
+def resolved(status, score=None):
+    return {"status": status, "targetScore": score}
+
+
+def test_display_ranks_order_settled_results_and_exclude_failures():
+    received = {1: BASE_MS, 2: BASE_MS + 500, 3: BASE_MS + 100, 4: BASE_MS + 200}
+    scores = {
+        1: resolved("submitted", 40.0),
+        2: resolved("submitted", 91.3),
+        3: resolved("no_face", 0.0),
+        4: resolved("failed"),
+    }
+
+    ranks = display_ranks(received, scores)
+
+    assert ranks == {2: 1, 1: 2, 3: 3, 4: None}
+
+
+def test_display_ranks_break_ties_by_receive_time_then_id():
+    received = {7: BASE_MS + 10, 3: BASE_MS, 9: BASE_MS}
+    scores = {
+        7: resolved("submitted", 70.0),
+        3: resolved("submitted", 70.0),
+        9: resolved("submitted", 70.0),
+    }
+
+    assert display_ranks(received, scores) == {3: 1, 9: 2, 7: 3}
+
+
+def test_display_ranks_of_an_empty_round_is_empty():
+    assert display_ranks({}, {}) == {}

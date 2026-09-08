@@ -168,6 +168,43 @@ async def resolved_count(client: Redis, round_id: int) -> int:
     return await cast(Awaitable[int], client.hlen(round_key(round_id, "scores")))
 
 
+async def read_scores(client: Redis, round_id: int) -> dict[int, dict[str, Any]]:
+    raw = await cast(Awaitable[dict[bytes, bytes]], client.hgetall(round_key(round_id, "scores")))
+    return {int(key): json.loads(value) for key, value in raw.items()}
+
+
+async def read_received(client: Redis, round_id: int) -> dict[int, int]:
+    raw = await cast(
+        Awaitable[dict[bytes, bytes]], client.hgetall(round_key(round_id, "submitted"))
+    )
+    return {int(key): int(value) for key, value in raw.items()}
+
+
+def display_ranks(
+    received: dict[int, int], scores: dict[int, dict[str, Any]]
+) -> dict[int, int | None]:
+    """RS-02·03 `currentRank`: the standing among results settled so far, display only (SC-09).
+
+    Points are never derived from this; §11 recomputes the ranking when the round finalizes.
+    """
+    ranked = sorted(
+        (
+            participant_id
+            for participant_id, payload in scores.items()
+            if payload.get("status") in (SubmissionStatus.SUBMITTED, SubmissionStatus.NO_FACE)
+        ),
+        key=lambda participant_id: (
+            -float(scores[participant_id].get("targetScore") or 0.0),
+            received.get(participant_id, 0),
+            participant_id,
+        ),
+    )
+    ranks: dict[int, int | None] = {participant_id: None for participant_id in scores}
+    for position, participant_id in enumerate(ranked, start=1):
+        ranks[participant_id] = position
+    return ranks
+
+
 async def submitted_count(client: Redis, round_id: int) -> int:
     return await cast(Awaitable[int], client.hlen(round_key(round_id, "submitted")))
 

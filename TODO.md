@@ -106,8 +106,9 @@
   - 2026-09-08 부분 구현: 방 행 잠금과 상태 CAS로 revealed→scoring→finalized/voided→closed 전이, 3초 카운트다운·절대 deadline·개인 촬영 토큰 발행을 구현했다. capturing은 별도 서버 전이 없이 클라이언트가 countdownEndsAt으로 계산하며, DB에는 업로드 경로(BE-014)가 붙을 때 기록한다.
 - [ ] `BE-034` (P0/L) ZSet 250ms 스케줄러·원자적 claim·잠금·재실행/복구 구현; deadline/scoring_guard/viewing_end/participant_left/host_delegate/room_expire 잡 등록 — §10.4, G-09
   - 2026-09-08 부분 구현: ZSet 폴링·Lua ZREM 소유권·30초 잡 락·취소/재예약과 Pod별 루프를 구현하고, 실제 Redis에서 동시 claim 1회·핸들러 실패 격리·중복 발화 없음을 검증했다. deadline·scoring_guard·viewing_end를 등록한다. participant_left·host_delegate·room_expire와 G-09의 잡 유실 복구는 미구현이다.
-- [ ] `BE-035` (P0/L) 유효 제출 인정→viewers 가입·제출 수 알림·기존 결과 backlog, 비동기 scored 개인 토큰 발행 구현 — §8.3·13, RD-05·09, RS-01~05·09, G-03·04
-  - 2026-09-08 부분 구현: 제출 인정 즉시 viewers에 가입시키고 `submission:status`(수만)와 개인 mediaToken을 담은 `submission:scored`를 발행한다. 미제출자에게는 어떤 결과도 가지 않는다. 늦은 열람자 backlog와 currentRank는 G-04 확정 후다.
+- [x] `BE-035` (P0/L) 유효 제출 인정→viewers 가입·제출 수 알림·기존 결과 backlog, 비동기 scored 개인 토큰 발행 구현 — §8.3·13, RD-05·09, RS-01~05·09, G-03·04
+  - 2026-09-08: 제출 인정 즉시 viewers에 가입시키고 `submission:status`(수만)와 개인 mediaToken을 담은 `submission:scored`를 발행한다. 미제출자에게는 어떤 결과도 가지 않는다.
+  - 2026-09-08 추가: 늦게 제출한 열람자에게 이미 채점된 결과를 도착 순서대로 재전송하고 `currentRank`를 채운다. FE 연동에서 두 번째 제출자의 결과 화면이 비는 문제가 실제로 발생해 확인했다. 재전송도 열람자 집합을 그대로 통과하므로 미제출자에게는 가지 않는다. 재접속·새로고침 복원은 여전히 BE-039다.
 - [ ] `BE-036` (P0/L) deadline/전원 제출 경쟁 시 scoring 1회 전환·missed 확정·missed→missedUpdate 2단계 알림 구현 — §10.2·13, RD-06·07, RS-11~14
   - 2026-09-08 부분 구현: deadline 잡의 scoring 1회 전환, 미제출자 확정과 `round:missed`·`round:missedUpdate` 2단계 알림을 구현했다. 알림은 남은 시간과 단계만 담는다. 전원 제출 조기 마감은 업로드 접수(BE-014)와 함께 붙인다.
 - [ ] `BE-037` (P0/M) 마감+8초 guard·늦은 추론 결과 폐기·전원 failed 무효·연속 3회 중단·정상 라운드 카운터 초기화·서킷 대기 구현 — §10.3·10.5, D-5

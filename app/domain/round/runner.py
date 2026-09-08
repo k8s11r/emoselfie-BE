@@ -4,13 +4,14 @@ import asyncio
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import clock
 from app.core.errors import AppError
 from app.core.redis import IMAGE_TTL_SEC, image_key
 from app.core.security import media_token
-from app.db.models import Participant, Room, Round
+from app.db.models import Participant, Room, Round, Submission
 from app.domain.enums import EmotionLabel, RoomStatus, RoundStatus, SubmissionStatus
 from app.domain.game.service import active_participants, open_round
 from app.domain.reaction import service as reactions
@@ -128,6 +129,7 @@ class RoundRunner:
             "submission:status",
             {"roundId": str(round_id), "submitted": submitted, "total": total},
         )
+        await self.send_backlog(round_id, room_id, participant_id)
         task = asyncio.create_task(
             self._score(round_id, room_id, participant_id, submission_id, image)
         )
@@ -191,6 +193,40 @@ class RoundRunner:
             image_key(round_id, participant_id), result, ex=IMAGE_TTL_SEC
         )
 
+    def _scored_card(
+        self,
+        current: Round,
+        owner: Participant,
+        submission_id: int,
+        payload: dict[str, Any],
+        rank: int | None,
+        scored: int,
+        total: int,
+    ) -> Callable[[Participant], dict[str, Any]]:
+        expires_at_ms = service.media_expiry_ms(current)
+        secret = self.runtime.settings.media_token_secret.get_secret_value()
+
+        def per_viewer(viewer: Participant) -> dict[str, Any]:
+            # RX-08: a photo exists even for no_face and failed, so every viewer gets a token.
+            return {
+                "roundId": str(current.id),
+                "submissionId": str(submission_id),
+                "participantId": str(owner.id),
+                "nickname": owner.nickname,
+                "colorTag": owner.color_tag,
+                "status": payload["status"],
+                "targetScore": payload.get("targetScore"),
+                "topEmotions": payload.get("topEmotions"),
+                "currentRank": rank,
+                "mediaToken": media_token(
+                    current.id, submission_id, viewer.id, expires_at_ms, secret
+                ),
+                "scoredCount": scored,
+                "scoredTotal": total,
+            }
+
+        return per_viewer
+
     async def _announce_score(
         self,
         round_id: int,
@@ -205,30 +241,52 @@ class RoundRunner:
             if owner is None or current is None:
                 return
             active = len(await active_participants(session, room_id))
-        scored = await service.resolved_count(self.runtime.redis, round_id)
-        expires_at_ms = service.media_expiry_ms(current)
-        secret = self.runtime.settings.media_token_secret.get_secret_value()
+        received = await service.read_received(self.runtime.redis, round_id)
+        scores = await service.read_scores(self.runtime.redis, round_id)
+        rank = service.display_ranks(received, scores).get(participant_id)
+        card = self._scored_card(current, owner, submission_id, payload, rank, len(scores), active)
+        await self._send_viewers("submission:scored", round_id, card)
 
-        def per_viewer(viewer: Participant) -> dict[str, Any]:
-            # RX-08: a photo exists even for no_face and failed, so every viewer gets a token.
-            return {
-                "roundId": str(round_id),
-                "submissionId": str(submission_id),
-                "participantId": str(participant_id),
-                "nickname": owner.nickname,
-                "colorTag": owner.color_tag,
-                "status": payload["status"],
-                "targetScore": payload.get("targetScore"),
-                "topEmotions": payload.get("topEmotions"),
-                "currentRank": None,
-                "mediaToken": media_token(
-                    round_id, submission_id, viewer.id, expires_at_ms, secret
-                ),
-                "scoredCount": scored,
-                "scoredTotal": active,
+    async def send_backlog(self, round_id: int, room_id: int, participant_id: int) -> None:
+        """RS-02·04: a viewer joins mid-round, so the results settled before them are replayed.
+
+        `submission:scored` only reaches the viewers of its own moment, so without this a late
+        submitter would never learn about the cards that were scored while they were shooting.
+        """
+        scores = await service.read_scores(self.runtime.redis, round_id)
+        earlier = {owner: payload for owner, payload in scores.items() if owner != participant_id}
+        if not earlier:
+            return
+        received = await service.read_received(self.runtime.redis, round_id)
+        ranks = service.display_ranks(received, scores)
+        async with self.runtime.sessions() as session:
+            current = await session.get(Round, round_id)
+            if current is None:
+                return
+            rows = {
+                row.participant_id: row.id
+                for row in await session.scalars(
+                    select(Submission).where(Submission.round_id == round_id)
+                )
             }
-
-        await self._send_viewers("submission:scored", round_id, per_viewer)
+            owners = {member.id: member for member in await active_participants(session, room_id)}
+            active = len(owners)
+        # Replay in arrival order so the receiving rail builds the same way it did live.
+        for owner_id in sorted(earlier, key=lambda value: (received.get(value, 0), value)):
+            owner = owners.get(owner_id)
+            submission_id = rows.get(owner_id)
+            if owner is None or submission_id is None:
+                continue
+            card = self._scored_card(
+                current,
+                owner,
+                submission_id,
+                earlier[owner_id],
+                ranks.get(owner_id),
+                len(scores),
+                active,
+            )
+            await self._send_viewers("submission:scored", round_id, card, only={participant_id})
 
     async def _finalize_if_resolved(self, round_id: int) -> None:
         async with self.runtime.sessions() as session:
@@ -366,6 +424,7 @@ class RoundRunner:
         event: ViewerEvent,
         round_id: int,
         payload: dict[str, Any] | Callable[[Participant], dict[str, Any]],
+        only: set[int] | None = None,
     ) -> None:
         if self.runtime.realtime is not None:
-            await self.runtime.realtime.send_viewers(round_id, event, payload)
+            await self.runtime.realtime.send_viewers(round_id, event, payload, only=only)

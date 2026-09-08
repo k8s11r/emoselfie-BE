@@ -359,11 +359,15 @@ class Realtime:
         round_id: int,
         event: ViewerEvent,
         payload: dict[str, Any] | Callable[[Participant], dict[str, Any]],
+        only: set[int] | None = None,
     ) -> None:
         """§13.1 blocks non-viewers physically. Room membership cannot follow a sid across
         Pods, so the round's viewer set decides the recipients and each one is addressed
         by its own sid. Per-viewer payloads (media tokens) need this anyway."""
         viewers = await round_service.viewer_ids(self.runtime.redis, round_id)
+        if only is not None:
+            # A replay still passes the same gate: the target must be a viewer of this round.
+            viewers &= only
         if not viewers:
             return
         async with self.runtime.sessions() as session:

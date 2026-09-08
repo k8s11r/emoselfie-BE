@@ -918,3 +918,84 @@ async def test_every_connected_viewer_skipping_closes_the_round(network):
     async with runtime.sessions() as session:
         current = await session.get(Round, round_id)
         assert current.status == RoundStatus.CLOSED
+
+
+async def test_a_late_submitter_receives_the_results_scored_before_them(network):
+    """RS-02·04: joining the viewers late must not hide the cards settled while shooting."""
+    http, connect, _ = network
+    host, _, host_cookie = await http(0)
+    guest, _, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 30})).json()[
+        "slug"
+    ]
+    host_id = (
+        await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "먼저"})
+    ).json()["participantId"]
+    guest_id = (
+        await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "나중"})
+    ).json()["participantId"]
+    host_socket, host_events = await connect(0, slug, host_cookie)
+    guest_socket, guest_events = await connect(1, slug, guest_cookie)
+    await next_event(host_events, "joined")
+    await next_event(guest_events, "joined")
+    await host.post(f"/api/rooms/{slug}/start")
+    mine = await next_event(host_events, "revealed")
+    theirs = await next_event(guest_events, "revealed")
+    round_id = int(mine["roundId"])
+
+    first = await upload(host, slug, round_id, mine["captureToken"])
+    early = await next_event(host_events, "scored")
+    assert early["participantId"] == host_id and early["currentRank"] == 1
+
+    # The guest was still shooting, so nothing about that card has reached them yet.
+    assert all(event != "scored" for event, _ in list(guest_events._queue))
+
+    second = await upload(guest, slug, round_id, theirs["captureToken"])
+    assert second.status_code == 202
+
+    replayed = await next_event(
+        guest_events, "scored", lambda data: data["participantId"] == host_id
+    )
+    assert replayed["submissionId"] == first.json()["submissionId"]
+    assert replayed["status"] == early["status"]
+    assert replayed["targetScore"] == early["targetScore"]
+    assert replayed["topEmotions"] == early["topEmotions"]
+    assert replayed["currentRank"] is not None
+    # §8.4: the replay is addressed to this viewer, so it carries their own token.
+    assert replayed["mediaToken"] != early["mediaToken"]
+    assert (await guest.get(f"/media/{replayed['mediaToken']}")).status_code == 200
+    assert (await host.get(f"/media/{replayed['mediaToken']}")).status_code == 403
+
+    own = await next_event(guest_events, "scored", lambda data: data["participantId"] == guest_id)
+    assert own["scoredTotal"] == 2 and own["scoredCount"] == 2
+    await next_event(guest_events, "finalized")
+
+
+async def test_a_non_submitter_receives_no_backlog(network):
+    """RS-12: the replay uses the same viewer gate, so a missed player still sees nothing."""
+    http, connect, apps = network
+    runtime = apps[0].state.resources
+    host, _, host_cookie = await http(0)
+    guest, _, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 30})).json()[
+        "slug"
+    ]
+    await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "제출자"})
+    await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "미제출자"})
+    host_socket, host_events = await connect(0, slug, host_cookie)
+    guest_socket, guest_events = await connect(1, slug, guest_cookie)
+    await next_event(host_events, "joined")
+    await next_event(guest_events, "joined")
+    await host.post(f"/api/rooms/{slug}/start")
+    mine = await next_event(host_events, "revealed")
+    await next_event(guest_events, "revealed")
+    round_id = int(mine["roundId"])
+
+    await upload(host, slug, round_id, mine["captureToken"])
+    await next_event(host_events, "scored")
+    await fire_now(runtime.redis, "round_deadline", round_id)
+    await next_event(guest_events, "missed")
+    await next_event(host_events, "finalized")
+
+    delivered = [event for event, _ in list(guest_events._queue)]
+    assert "scored" not in delivered and "finalized" not in delivered
