@@ -35,7 +35,10 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-markers = ["integration: requires migrated PostgreSQL and two Redis instances"]
+markers = [
+  "integration: requires migrated PostgreSQL and two Redis instances",
+  "model: requires the inference extra and prepared model artifacts",
+]
 addopts = "-ra --strict-markers"
 
 [tool.ruff]

@@ -1,6 +1,6 @@
 # emoselfie-BE
 
-이모셀피 백엔드입니다. M0 기반과 세션·방·실시간 대기실을 구현했습니다. 쿠키 인증, 방 생성·입장·설정·닫기, 대기실 복원과 두 서버 간 Socket.IO 갱신을 테스트할 수 있습니다. 라운드 진행·사진 업로드·실제 추론은 아직 구현하지 않았습니다.
+이모셀피 백엔드입니다. M0 기반, 세션·방·실시간 대기실, 실제 감정 추론 엔진을 구현했습니다. 쿠키 인증, 방 생성·입장·설정·닫기, 대기실 복원과 두 서버 간 Socket.IO 갱신, 실제 모델의 JPEG→7감정 판별을 테스트할 수 있습니다. 라운드 진행과 사진 업로드 API는 아직 구현하지 않았으므로 추론 엔진은 아직 HTTP로 노출되지 않습니다.
 
 ## 로컬 실행
 
@@ -22,7 +22,25 @@ uv run uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000 --relo
 - [Readiness](http://127.0.0.1:8000/health/ready): DB·조율 Redis·이미지 Redis와 선택한 추론 엔진 확인
 - [API 문서](http://127.0.0.1:8000/docs)
 
-개발 설정은 `APP_ENV=development`, `INFERENCE_BACKEND=fake`입니다. readiness에 `inferenceBackend: "fake"`가 표시됩니다. 운영 환경은 fake를 거부하고, 실제 모델 로더가 완성되기 전에는 startup에 실패합니다. 실제 모델 검증을 완료한 상태가 아닙니다.
+개발 설정은 `APP_ENV=development`, `INFERENCE_BACKEND=fake`입니다. readiness에 `inferenceBackend: "fake"`가 표시됩니다. 운영 환경은 fake를 거부하며, 모델 아티팩트가 없거나 크기·체크섬이 어긋나면 startup에 실패하고 fake로 대체하지 않습니다.
+
+### 실제 모델 실행
+
+추론 의존성(torch, mediapipe)과 아티팩트는 선택 설치입니다. 아티팩트는 `app/inference/artifacts.json`에 URL·sha256·크기로 고정되어 있고 준비 스크립트가 스트리밍 중 검증합니다.
+
+```sh
+uv sync --locked --extra inference
+uv run python scripts/prepare_models.py --with-example
+```
+
+`.models/`에 내려받으며 Git에서 제외합니다. `--with-example`은 대조용 저자 데모 이미지까지 받습니다. 배포에서는 읽기 전용 볼륨의 `/models/...`를 사용하고, 로컬에서 실제 엔진을 쓰려면 `.env`의 `INFERENCE_BACKEND=real`과 함께 두 경로를 내려받은 위치로 바꿉니다.
+
+```sh
+EMOTION_MODEL_PATH=.models/FER_static_ResNet50_AffectNet.pt
+FACE_MODEL_PATH=.models/blaze_face_short_range.tflite
+```
+
+전처리는 `/255`나 ImageNet 정규화를 쓰지 않습니다. 원본 0~255 BGR에서 모델의 VGGFace2 평균만 빼며, 이 값이 upstream 기준 구현과 정확히 일치하는지 모델 테스트가 확인합니다.
 
 PostgreSQL은 `127.0.0.1:55432`, 조율 Redis는 `56379`, 이미지 Redis는 `56380`을 사용합니다. 두 Redis는 별도 인스턴스이며 이미지에는 RDB/AOF/볼륨을 사용하지 않습니다. 로컬 서비스를 중지하려면 `docker compose stop`을 사용합니다.
 
@@ -52,11 +70,16 @@ uv run pytest
 # 위 로컬 서비스와 migration이 준비된 상태
 uv run alembic check
 uv run pytest --run-integration
+
+# 추론 extra와 준비된 아티팩트가 있는 상태
+MODEL_DIR=.models uv run pytest --run-model
 ```
 
-기본 pytest는 외부 서비스 없이 단위·계약 테스트를 실행하고 integration은 명시적으로 건너뜁니다. 통합 테스트는 고유한 테스트 사용자·방·Redis 키만 생성하고 정리하며 전체 DB/Redis를 비우지 않습니다. DB·Redis는 고정된 로컬 개발 포트를 사용하고, 소켓 테스트는 임의의 빈 포트에 실제 Uvicorn 서버 2개를 실행한 뒤 정리합니다.
+기본 pytest는 외부 서비스 없이 단위·계약 테스트를 실행하고 integration과 model은 명시적으로 건너뜁니다. `--run-model`은 실제 weight를 불러 저자 데모 이미지의 판정과 전처리 일치를 대조하므로 아티팩트가 없으면 실패합니다. 통합 테스트는 고유한 테스트 사용자·방·Redis 키만 생성하고 정리하며 전체 DB/Redis를 비우지 않습니다. DB·Redis는 고정된 로컬 개발 포트를 사용하고, 소켓 테스트는 임의의 빈 포트에 실제 Uvicorn 서버 2개를 실행한 뒤 정리합니다.
 
-2026-09-08 기준 전체 66개 테스트, Ruff lint/format, mypy, migration 적용·롤백·재적용이 통과했습니다. 실제 FE 브라우저·모바일·게임 완주 검증과 원격 CI는 아직 실행하지 않았습니다.
+2026-09-08 기준 전체 98개 테스트(단위·계약 65, 통합 26, 모델 7), Ruff lint/format, mypy, migration 적용·롤백·재적용이 통과했습니다. 실제 FE 브라우저·모바일·게임 완주 검증과 원격 CI는 아직 실행하지 않았습니다.
+
+로컬 benchmark(Apple M3, torch 1스레드, 동시성 2)에서 모델 로드는 1.41초, 단일 추론 p50은 24~30ms, 1440×1920 12장 동시 제출은 254ms였고 프로세스 RSS는 약 460MB였습니다. HTTP 업로드를 포함한 종단 측정은 아직 아닙니다. 자세한 수치는 [추적표](./docs/traceability.md)에 있습니다.
 
 GitHub Actions는 같은 명령과 초기 migration의 `downgrade base → upgrade head`를 격리된 CI DB에서 검사합니다. `downgrade base`는 테이블을 삭제하므로 보존할 데이터가 있는 DB에서는 실행하지 않습니다.
 
@@ -69,4 +92,4 @@ GitHub Actions는 같은 명령과 초기 migration의 `downgrade base → upgra
 - [구현 계약과 미확정 항목](./docs/contracts.md): 스키마 보강, G-01~12 상태와 후속 경계
 - [요구사항 추적표](./docs/traceability.md): 구현 파일과 검증 근거
 
-다음 개발은 라운드 상태 머신·분산 타이머·업로드·추론 통합입니다. 실제 모델 공급(G-01), 업로드 재시도·접수(G-02·03), 게임 화면 복원 DTO(G-04), 채점 동점/평균(G-11)은 아직 확정되지 않았습니다.
+다음 개발은 업로드 접수(BE-014·016)와 미디어 열람(BE-017), 이어서 라운드 상태 머신·분산 타이머입니다. 모델 아티팩트는 고정했지만 공급 경로 승인(G-01)과 업로드 재시도·접수(G-02·03), 게임 화면 복원 DTO(G-04), 채점 동점/평균(G-11)은 아직 확정되지 않았습니다.

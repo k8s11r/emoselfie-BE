@@ -5,13 +5,24 @@ from app.core.config import Settings
 
 def pytest_addoption(parser):
     parser.addoption("--run-integration", action="store_true", default=False)
+    parser.addoption("--run-model", action="store_true", default=False)
 
 
 def pytest_collection_modifyitems(config, items):
-    if not config.getoption("--run-integration"):
-        skip = pytest.mark.skip(reason="Use --run-integration with local PostgreSQL and Redis")
+    gates = [
+        (
+            "integration",
+            "--run-integration",
+            "Use --run-integration with local PostgreSQL and Redis",
+        ),
+        ("model", "--run-model", "Use --run-model with the inference extra and prepared artifacts"),
+    ]
+    for marker, option, reason in gates:
+        if config.getoption(option):
+            continue
+        skip = pytest.mark.skip(reason=reason)
         for item in items:
-            if "integration" in item.keywords:
+            if marker in item.keywords:
                 item.add_marker(skip)
 
 

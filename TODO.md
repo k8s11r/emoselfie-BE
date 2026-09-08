@@ -52,14 +52,19 @@
 
 - [x] `BE-010` (P0/M) EmotionClassifier Protocol·EmotionResult·InferenceError 경계와 fake 시나리오 구현; no_face와 failed 구분 — §12.1, SC-04·05
   - 2026-09-08: 성공/무검출/실패/취소 가능한 timeout·7확률 검증 테스트. 실제 엔진은 미구현.
-- [ ] `BE-011` (P0/L) 실제 아키텍처·weight·FaceDetector startup 로드/warmup·모델 누락 시 실패·종료 자원 해제 — §12.4, G-01
-- [ ] `BE-012` (P0/L) JPEG decode→최대 얼굴→crop→224×224→BGR→VGGFace2 mean→ResNet50→7확률 구현; `/255`·ImageNet 정규화 금지, 모델 기준 출력 대조 — §12.2
-- [ ] `BE-013` (P0/L) 큐·Semaphore(초기 2)·전용 executor·5초 timeout·서킷 브레이커(최근 20건 80% 실패 시 60초) 구현; 실제 작업 종료 전 슬롯 해제로 동시성이 초과되지 않는지 검증 — §12.3
+- [x] `BE-011` (P0/L) 실제 아키텍처·weight·FaceDetector startup 로드/warmup·모델 누락 시 실패·종료 자원 해제 — §12.4, G-01
+  - 2026-09-08: Ryumina ResNet50 AffectNet weight와 MediaPipe BlazeFace를 sha256·크기로 고정하고 `scripts/prepare_models.py`로 공급한다. 로드·warmup은 스레드에서 수행해 이벤트 루프를 막지 않으며, 아티팩트 누락·크기·체크섬 불일치는 startup 실패로 처리하고 fake로 대체하지 않는다. `tests/model` 및 `test_inference.py`로 검증. 모델 담당의 공급 경로 승인(BE-DEC-01)은 여전히 미완료다.
+- [x] `BE-012` (P0/L) JPEG decode→최대 얼굴→crop→224×224→BGR→VGGFace2 mean→ResNet50→7확률 구현; `/255`·ImageNet 정규화 금지, 모델 기준 출력 대조 — §12.2
+  - 2026-09-08: 전처리를 upstream `pth_processing` 기준 구현과 교차 계산해 오차 없이 일치함을 확인했다(`test_preprocessing_matches_the_upstream_reference`). 저자 데모 이미지는 happy 0.97로 판정되어 라벨 순서를 고정했다. 얼굴 crop은 upstream의 face_mesh 랜드마크 박스가 아니라 BlazeFace 검출 박스를 사용하므로 crop 좌표까지 동일하지는 않다.
+- [x] `BE-013` (P0/L) 큐·Semaphore(초기 2)·전용 executor·5초 timeout·서킷 브레이커(최근 20건 80% 실패 시 60초) 구현; 실제 작업 종료 전 슬롯 해제로 동시성이 초과되지 않는지 검증 — §12.3
+  - 2026-09-08: timeout·취소 시에도 네이티브 작업이 끝날 때까지 슬롯을 유지하고, 버려진 요청은 실행하지 않으며, 종료는 대기 작업을 거절하고 진행 중 작업을 배수한 뒤 엔진을 닫는다. 취소된 요청이 서킷을 오염시키지 않음도 확인했다(`test_runner.py`). 업로드 API 연결은 BE-014·016에서 이어진다.
 - [ ] `BE-014` (P0/L) body 읽기 전 서버 수신 시각 기록, 방/참여자/현재 라운드/상태 검증, deadline·개인 촬영 토큰·원자적 중복 접수 구현 — §6.3·8.3, CP-03·08~10, G-02·03
 - [ ] `BE-015` (P0/L) multipart 스트림 2MB 한도·Content-Length 없는 요청·실제 decode 검증·body 중단/413/415 정리 구현; 임시 파일 방지 및 비정상 이미지 열람 차단 — §8.3, G-03·10
+  - 2026-09-08 부분 구현: `media/images.py`의 바이트·픽셀 한도, JPEG 시그니처·다중 프레임·decompression bomb 거절, EXIF 회전 및 임시 파일 미사용, 결과 재인코딩 시 메타데이터 제거를 검증했다. multipart 스트림 한도와 body 중단 정리는 업로드 엔드포인트(BE-014)와 함께 구현한다.
 - [ ] `BE-016` (P0/M) 202/processing·submissionId·acceptedAtMs 반환, 재요청 기존 접수 복원·큐 투입 실패 처리 구현 — §8.3, G-02·08
 - [ ] `BE-017` (P0/L) 전체 프레임 JPEG 재인코딩·Redis TTL 180초·개인 mediaToken 발급/갱신·쿠키 소유/현재 열람 권한 확인·no-store·403/410 구현; Q-7 추가 반전/크롭 없음 — §8.4, PV-01·02, G-10
 - [ ] `BE-018` (P0/M) 실제 모델 단일 사용자 업로드→결과 benchmark, 모델/장비·동시성·큐 대기·메모리 기록; 원본/crop 해제·no_face/오류·timeout 검증 — §21-D
+  - 2026-09-08 부분 측정(Apple M3, 8 CPU, torch 1스레드, Python 3.11.16): 로드 1.41초·warmup 0.04초, 프로세스 RSS 47MB→454MB. 단일 추론 p50 24ms(375×375)~30ms(1440×1920). 1440×1920 12장 동시 제출은 concurrency 2에서 254ms에 완료됐다. no_face와 자원 해제는 `tests/model`로 검증했다. HTTP 업로드 구간을 포함한 종단 측정은 BE-014·016 이후로 남는다.
 
 완료 게이트: 실제 JPEG가 실제 모델 결과로 연결되고 자원이 정리된다. 모델 미확보 시 M1 완료로 표시하지 않는다.
 
@@ -141,6 +146,7 @@ M2 완료 게이트: 실제 모델로 2인 완주, 결과 접근제어·누적 �
 - [ ] `BE-061` (P0/M) 구조화 로그 allowlist·UUID/이미지/base64/crop/face_box/토큰 차단·오류 경로 필터 테스트 — §17, ID-08, PV-05
 - [ ] `BE-062` (P0/M) §17의 추론/접수/확정/소켓/잡 지연/이미지 메모리 메트릭·대시보드/알림과 종단 성능 측정 연결
 - [ ] `BE-063` (P0/M) Docker·모델 RO mount·환경변수/Secret·1 worker·live/ready·graceful shutdown·CI 이미지 빌드 및 migration 실행 절차 — §8.5·20
+  - 2026-09-08 확인: 현재 lock은 Linux에서 torch의 CUDA 휠과 nvidia 패키지 34개를 함께 해석한다. 서버는 CPU만 사용하므로 이미지 크기와 CI 시간을 위해 `download.pytorch.org/whl/cpu` 인덱스를 Linux에 한정해 고정하고 lock을 재생성해야 한다. 그 뒤에 `--run-model`을 실행하는 CI 잡을 추가한다.
 - [ ] `BE-064` (P0/L) Infra와 동일 오리진 TLS·Socket.IO 다중 Pod 연결 방식·프록시 수신 시각/body buffering·임시 파일·Redis 별도 인스턴스/persistence/메모리 상한 검증 — G-10, PM-14, PV-05
 - [ ] `BE-065` (P0/L) FE와 iOS Safari/Android Chrome 실제 기기, Wi-Fi↔LTE·background·권한 철회·2명/12명 검증; 오프라인 모임 3회 이상 베타 기록 — M4, §21-E
 - [ ] `BE-066` (P0/L) 100방/1,200명·동시 제출·지연/오류/재접속 부하 측정; 업로드 완료→결과 p95≤3초·상태 편차≤500ms·메모리/큐 상한 검증 — M5, §21-D·F
