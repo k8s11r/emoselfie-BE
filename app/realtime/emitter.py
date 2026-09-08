@@ -3,17 +3,31 @@ from typing import Any, Literal
 import socketio
 
 PersonalEvent = Literal[
-    "room:joined", "room:closed", "session:superseded", "round:revealed", "round:missed"
+    "room:joined",
+    "room:closed",
+    "session:superseded",
+    "round:revealed",
+    "round:missed",
+    "round:missedUpdate",
 ]
 RoomEvent = Literal["game:started", "round:voided", "game:finished"]
+ViewerEvent = Literal["round:finalized", "round:closed"]
 PERSONAL_EVENTS = frozenset(
-    ("room:joined", "room:closed", "session:superseded", "round:revealed", "round:missed")
+    (
+        "room:joined",
+        "room:closed",
+        "session:superseded",
+        "round:revealed",
+        "round:missed",
+        "round:missedUpdate",
+    )
 )
 ROOM_EVENTS = frozenset(("game:started", "round:voided", "game:finished"))
+VIEWER_EVENTS = frozenset(("round:finalized", "round:closed"))
 
 
 class Emitter:
-    """Lobby, personal round and room-wide game events. Result channels are still missing."""
+    """One place decides which channel an event may use. Result events stay in `viewers`."""
 
     def __init__(self, server: socketio.AsyncServer) -> None:
         self.server = server
@@ -28,3 +42,9 @@ class Emitter:
         if event not in ROOM_EVENTS:
             raise ValueError("Unsupported room event")
         await self.server.emit(event, payload, room=f"r:{room_id}")
+
+    async def viewers(self, event: ViewerEvent, round_id: int, payload: dict[str, Any]) -> None:
+        """RS-12: only participants who earned the round's results ever join this channel."""
+        if event not in VIEWER_EVENTS:
+            raise ValueError("Unsupported viewer event")
+        await self.server.emit(event, payload, room=f"rd:{round_id}:viewers")

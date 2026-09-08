@@ -99,11 +99,16 @@
 - [ ] `BE-032` (P0/M) room:joined·settingsUpdated·participant 갱신·game:started·presence 25초와 상태 DTO 구현; 대기자의 라운드 정보 차단 — §13, G-05·06
   - 2026-09-08: 대기실 전체 snapshot 갱신·presence ack/TTL 구현. game:started 및 게임 중 상태는 미구현.
 - [ ] `BE-033` (P0/L) Room/Round CAS와 revealed→capturing→scoring→finalized/voided→closed 구현; 3초 카운트다운·개인 captureToken·절대 deadline 발행 — §3·10.1, RD-03·08
+  - 2026-09-08 부분 구현: 방 행 잠금과 상태 CAS로 revealed→scoring→finalized/voided→closed 전이, 3초 카운트다운·절대 deadline·개인 촬영 토큰 발행을 구현했다. capturing은 별도 서버 전이 없이 클라이언트가 countdownEndsAt으로 계산하며, DB에는 업로드 경로(BE-014)가 붙을 때 기록한다.
 - [ ] `BE-034` (P0/L) ZSet 250ms 스케줄러·원자적 claim·잠금·재실행/복구 구현; deadline/scoring_guard/viewing_end/participant_left/host_delegate/room_expire 잡 등록 — §10.4, G-09
+  - 2026-09-08 부분 구현: ZSet 폴링·Lua ZREM 소유권·30초 잡 락·취소/재예약과 Pod별 루프를 구현하고, 실제 Redis에서 동시 claim 1회·핸들러 실패 격리·중복 발화 없음을 검증했다. deadline·scoring_guard·viewing_end를 등록한다. participant_left·host_delegate·room_expire와 G-09의 잡 유실 복구는 미구현이다.
 - [ ] `BE-035` (P0/L) 유효 제출 인정→viewers 가입·제출 수 알림·기존 결과 backlog, 비동기 scored 개인 토큰 발행 구현 — §8.3·13, RD-05·09, RS-01~05·09, G-03·04
 - [ ] `BE-036` (P0/L) deadline/전원 제출 경쟁 시 scoring 1회 전환·missed 확정·missed→missedUpdate 2단계 알림 구현 — §10.2·13, RD-06·07, RS-11~14
+  - 2026-09-08 부분 구현: deadline 잡의 scoring 1회 전환, 미제출자 확정과 `round:missed`·`round:missedUpdate` 2단계 알림을 구현했다. 알림은 남은 시간과 단계만 담는다. 전원 제출 조기 마감은 업로드 접수(BE-014)와 함께 붙인다.
 - [ ] `BE-037` (P0/M) 마감+8초 guard·늦은 추론 결과 폐기·전원 failed 무효·연속 3회 중단·정상 라운드 카운터 초기화·서킷 대기 구현 — §10.3·10.5, D-5
+  - 2026-09-08 부분 구현: 마감+8초 guard가 미확정 추론을 failed로 확정하고, 제출자 전원 failed면 라운드를 무효로 만들며 연속 카운터를 증가·정상 라운드에서 초기화한다. 늦은 결과 폐기와 서킷 브레이커 대기는 업로드 경로 이후다.
 - [ ] `BE-038` (P0/M) 제출 0건·마지막 voided·active 2명 미만 종료·남은 잡 취소와 모든 종료 경로 처리 — §10.5·10.6, G-07
+  - 2026-09-08 부분 구현: 제출 0건은 감상 단계를 건너뛰고, 마지막 voided도 정상 종료로 처리하며, active 2명 미만과 연속 무효 3회는 중단 종료로 이어진다. 남은 guard·viewing_end 잡을 취소한다. G-07 합의 전 BE 기준이며 docs/contracts.md에 기록했다.
 - [ ] `BE-039` (P0/L) GET `/state` screen별 snapshot·serverTimeMs·제출/토큰/결과/내 리액션·스킵 복원·구독 경합/재전달 구현; 미제출자 감정까지 제거 — §14, ID-05, G-04·06
   - 2026-09-08: waiting snapshot·현재 참여자 권한·DB 행 잠금으로 일관된 읽기 구현. 게임 상태는 503으로 차단하며 screen/revision/replay는 미구현.
 
@@ -114,7 +119,9 @@
 - [x] `BE-040` (P0/M) targetScore 1자리·라운드 정렬·100/70/50/30·no_face 30·failed 보정·missed 0 순수 함수와 §18.1 테이블 테스트 구현 — SC-01~05·09, G-11
   - 2026-09-08: `domain/scoring`에 라운드 채점·누적·최종 순위·mostLoved를 I/O 없는 순수 함수로 구현하고 §18.1 표 10개 케이스를 모두 덮었다. 반올림 half-up, failed 평균 모집단, 0점과 no_face 정렬, 완전 동점 키는 docs/contracts.md에 BE 기준으로 기록했으며 G-11 합의로 바뀔 수 있다. DB 반영과 이벤트 발행은 BE-041·042다.
 - [ ] `BE-041` (P0/L) finalized 트랜잭션에 제출·포인트·best_round_score·라운드 상태 반영, 재실행 시 중복 누적 방지 및 커밋 후 이벤트 복구 — D-8, G-08·09
+  - 2026-09-08 부분 구현: 제출·포인트·best_round_score·라운드 상태를 한 트랜잭션에 반영하고, scoring 상태 CAS로 재실행 시 중복 누적을 막는다. 커밋 후 이벤트 유실 복구는 G-09와 함께 남는다.
 - [ ] `BE-042` (P0/M) 최종 순위(-totalPoints,-bestRoundScore,joinedAt)·mostLoved/동수/null, 중단 reason 및 전원 game:finished 구현 — §11.4, SC-06, RX-11, FN-01~03
+  - 2026-09-08 부분 구현: 최종 순위·mostLoved·중단 reason과 전원 `game:finished` 발행, 종료 시 소유 슬롯 반환을 구현했다. 리액션 누적은 아직 0이므로 mostLoved는 항상 null이며 BE-043 이후 실제 값이 된다.
 - [ ] `BE-043` (P0/L) 리액션 수신 권한·채점 확정·자기 사진 금지·like/question 독립 토글·원자적 카운트·중복 명령 방어 구현 — §13.2, RX-01~09, G-02
 - [ ] `BE-044` (P0/M) 감상 시간 min(60,10+viewers×2)·서버 종료 시각·스킵 토글·connected viewers 분모·방장 즉시 종료 구현 — §10.3, RS-08·15, G-07
 - [ ] `BE-045` (P0/L) 종료/투표 경합 직렬화·closed 리액션 최종 DB 저장·집계/종료 snapshot·종료 후 명령 거부 구현 — RX-10, G-08

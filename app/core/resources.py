@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.core.config import Settings
 from app.db.session import create_engine, session_factory
+from app.domain.round.runner import RoundRunner
+from app.domain.scheduler.service import SchedulerLoop
 from app.inference.loader import load_classifier
 from app.inference.protocol import ManagedEmotionClassifier
 from app.realtime.server import Realtime
@@ -18,6 +20,8 @@ class Resources:
         self.initialized = False
         self.classifier: ManagedEmotionClassifier | None = None
         self.realtime: Realtime | None = None
+        self.rounds = RoundRunner(self)
+        self.scheduler: SchedulerLoop | None = None
         self.engine: AsyncEngine = create_engine(settings)
         self.sessions = session_factory(self.engine)
         self.redis = Redis.from_url(
@@ -43,6 +47,11 @@ class Resources:
                 raise RuntimeError("Required backend dependencies are unavailable")
             self.initialized = True
             self.realtime = Realtime(self)
+            # Every Pod polls; §10.4's atomic claim keeps each timer firing exactly once.
+            self.scheduler = SchedulerLoop(
+                self.redis, self.rounds.handle, tick_ms=self.settings.scheduler_tick_ms
+            )
+            self.scheduler.start()
         except BaseException:
             await self.close()
             raise
@@ -73,6 +82,9 @@ class Resources:
         self.initialized = False
         self.classifier = None
         try:
+            if self.scheduler is not None:
+                await self.scheduler.stop()
+                self.scheduler = None
             if self.realtime is not None:
                 await self.realtime.shutdown()
                 self.realtime = None

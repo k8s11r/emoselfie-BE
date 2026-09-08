@@ -1,7 +1,9 @@
 import asyncio
 import ipaddress
+import json
 import socket
 from contextlib import AsyncExitStack
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -10,15 +12,25 @@ import uvicorn
 from httpx import AsyncClient
 from sqlalchemy import delete, select
 
-from app.core.redis import rate_limit_key, room_key, socket_key, user_socket_key
+from app.core import clock
+from app.core.redis import (
+    SCHEDULER_TIMERS,
+    job_lock_key,
+    rate_limit_key,
+    room_key,
+    round_key,
+    socket_key,
+    user_socket_key,
+)
 from app.core.security import (
     COOKIE_NAME,
     private_rate_subject,
     sign_cookie,
     verify_capture_token,
 )
-from app.db.models import Participant, Room, Round, User
-from app.domain.enums import ConnectionStatus, RoomStatus, RoundStatus
+from app.db.models import Participant, Room, Round, Submission, User
+from app.domain.enums import ConnectionStatus, RoomStatus, RoundStatus, SubmissionStatus
+from app.domain.scheduler.service import Job, due_at, schedule
 from app.main import create_app
 
 pytestmark = pytest.mark.integration
@@ -85,6 +97,12 @@ async def network(settings):
                 client.on("session:superseded", lambda data: queue.put_nowait(("superseded", data)))
                 client.on("game:started", lambda data: queue.put_nowait(("started", data)))
                 client.on("round:revealed", lambda data: queue.put_nowait(("revealed", data)))
+                client.on("round:missed", lambda data: queue.put_nowait(("missed", data)))
+                client.on(
+                    "round:missedUpdate", lambda data: queue.put_nowait(("missedUpdate", data))
+                )
+                client.on("round:voided", lambda data: queue.put_nowait(("voided", data)))
+                client.on("game:finished", lambda data: queue.put_nowait(("finished", data)))
                 await client.connect(
                     f"http://127.0.0.1:{ports[pod]}?slug={slug}",
                     headers={"Cookie": f"{COOKIE_NAME}={cookie}"},
@@ -118,9 +136,36 @@ async def network(settings):
                     rooms = list(
                         await session.scalars(select(Room).where(Room.host_user_id.in_(users)))
                     )
+                    round_ids = list(
+                        await session.scalars(
+                            select(Round.id).where(Round.room_id.in_([room.id for room in rooms]))
+                        )
+                    )
                     await session.execute(delete(Room).where(Room.host_user_id.in_(users)))
                     await session.execute(delete(User).where(User.uuid.in_(users)))
+                for round_id in round_ids:
+                    await redis.zrem(
+                        SCHEDULER_TIMERS,
+                        *[
+                            Job(kind, round_id).member
+                            for kind in (
+                                "round_deadline",
+                                "round_scoring_guard",
+                                "round_viewing_end",
+                            )
+                        ],
+                    )
                 keys = [user_socket_key(str(uid)) for uid in users]
+                keys += [
+                    round_key(round_id, kind)
+                    for round_id in round_ids
+                    for kind in ("submitted", "scores", "skips")
+                ]
+                keys += [
+                    job_lock_key(Job(kind, round_id).lock_id)
+                    for round_id in round_ids
+                    for kind in ("round_deadline", "round_scoring_guard", "round_viewing_end")
+                ]
                 keys += [socket_key(sid) for sid in sid_values]
                 keys += [rate_limit_key("socket", private_rate_subject(sid)) for sid in sid_values]
                 keys += [room_key(room.id, "presence") for room in rooms]
@@ -303,3 +348,231 @@ async def test_only_the_host_starts_and_a_waiting_joiner_waits_for_the_next_game
         "active",
         "waiting_next_game",
     ]
+
+
+async def seed_submission(redis, round_id, participant_id, *, status, score=None, received_ms=None):
+    """Stands in for the upload path (BE-014·016) that will write these keys."""
+    await redis.hset(
+        round_key(round_id, "submitted"),
+        str(participant_id),
+        str(received_ms or clock.now_ms()),
+    )
+    await redis.hset(
+        round_key(round_id, "scores"),
+        str(participant_id),
+        json.dumps(
+            {
+                "status": status,
+                "targetScore": score,
+                "topEmotions": (
+                    [{"label": "happy", "score": score}] if status == "submitted" else None
+                ),
+            }
+        ),
+    )
+
+
+async def fire_now(redis, kind, round_id):
+    """Move a scheduled timer into the past so the running loop claims it on its next tick."""
+    assert await due_at(redis, Job(kind, round_id)) is not None
+    await schedule(redis, Job(kind, round_id), clock.now_ms() - 1)
+
+
+async def wait_for_round(sessions, room_id, predicate):
+    async with asyncio.timeout(10):
+        while True:
+            async with sessions() as session:
+                room = await session.get(Room, room_id)
+                await session.refresh(room)
+                current = (
+                    await session.get(Round, room.current_round_id)
+                    if room.current_round_id
+                    else None
+                )
+                if predicate(room, current):
+                    return room, current
+            await asyncio.sleep(0.05)
+
+
+async def test_a_full_three_round_game_scores_advances_and_finishes(network):
+    http, connect, apps = network
+    runtime = apps[0].state.resources
+    redis = runtime.redis
+    host, _, host_cookie = await http(0)
+    guest, _, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 15})).json()[
+        "slug"
+    ]
+    host_id = (
+        await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    ).json()["participantId"]
+    guest_id = (
+        await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "참가자"})
+    ).json()["participantId"]
+    host_socket, host_events = await connect(0, slug, host_cookie)
+    guest_socket, guest_events = await connect(1, slug, guest_cookie)
+    await next_event(host_events, "joined")
+    await next_event(guest_events, "joined")
+
+    assert (await host.post(f"/api/rooms/{slug}/start")).status_code == 200
+    first = await next_event(host_events, "revealed")
+    room_id = int(
+        (await next_event(guest_events, "revealed")) and (await _room_id(runtime.sessions, slug))
+    )
+    round_one = int(first["roundId"])
+
+    # The deadline timer is armed from the committed round, not from the request time.
+    assert await due_at(redis, Job("round_deadline", round_one)) == first["deadlineAtMs"]
+
+    # Round 1: both players are scored, so the round finalizes and opens a viewing stage.
+    await seed_submission(redis, round_one, int(host_id), status="submitted", score=91.3)
+    await seed_submission(
+        redis, round_one, int(guest_id), status="submitted", score=40.0, received_ms=clock.now_ms()
+    )
+    await fire_now(redis, "round_deadline", round_one)
+    _, _ = await wait_for_round(
+        runtime.sessions, room_id, lambda room, current: current.status == RoundStatus.FINALIZED
+    )
+
+    async with runtime.sessions() as session:
+        rows = list(
+            await session.scalars(select(Submission).where(Submission.round_id == round_one))
+        )
+        by_participant = {row.participant_id: row for row in rows}
+        assert by_participant[int(host_id)].rank == 1
+        assert by_participant[int(host_id)].rank_points == 100
+        assert by_participant[int(host_id)].target_score == Decimal("91.3")
+        assert by_participant[int(guest_id)].rank == 2
+        assert by_participant[int(guest_id)].rank_points == 70
+        players = {
+            player.id: player
+            for player in await session.scalars(
+                select(Participant).where(Participant.room_id == room_id)
+            )
+        }
+        assert players[int(host_id)].total_points == 100
+        assert players[int(guest_id)].total_points == 70
+        current = await session.get(Round, round_one)
+        assert current.viewing_ends_at is not None
+
+    # RS-08: two viewers earn 10 + 2 x 2 seconds of viewing before the next round.
+    await fire_now(redis, "round_viewing_end", round_one)
+    second = await next_event(host_events, "revealed", lambda data: data["index"] == 2)
+    round_two = int(second["roundId"])
+    assert round_two != round_one
+
+    # Round 2: nobody submits, so both players are missed and the round carries no viewing stage.
+    await fire_now(redis, "round_deadline", round_two)
+    missed = await next_event(guest_events, "missed")
+    assert missed["roundId"] == str(round_two) and missed["phase"] == "scoring"
+    assert "targetScore" not in str(missed) and "results" not in str(missed)
+    third = await next_event(guest_events, "revealed", lambda data: data["index"] == 3)
+    round_three = int(third["roundId"])
+
+    async with runtime.sessions() as session:
+        rows = list(
+            await session.scalars(select(Submission).where(Submission.round_id == round_two))
+        )
+        assert {row.status for row in rows} == {SubmissionStatus.MISSED}
+        assert all(row.rank is None and row.rank_points == 0 for row in rows)
+        assert all(row.received_at is None for row in rows)
+        players = {
+            player.id: player.total_points
+            for player in await session.scalars(
+                select(Participant).where(Participant.room_id == room_id)
+            )
+        }
+        assert players == {int(host_id): 100, int(guest_id): 70}
+
+    # Round 3: every submitter fails, so D-5 voids the round and nobody gains points.
+    await seed_submission(redis, round_three, int(host_id), status="failed")
+    await seed_submission(redis, round_three, int(guest_id), status="failed")
+    await fire_now(redis, "round_deadline", round_three)
+
+    voided = await next_event(host_events, "voided")
+    assert voided["roundId"] == str(round_three) and voided["reason"] == "engine_unavailable"
+    finished = await next_event(guest_events, "finished")
+    assert finished["aborted"] is False and finished["reason"] is None
+    assert [entry["participantId"] for entry in finished["ranking"]] == [host_id, guest_id]
+    assert [entry["totalPoints"] for entry in finished["ranking"]] == [100, 70]
+    assert [entry["rank"] for entry in finished["ranking"]] == [1, 2]
+    assert finished["mostLoved"] is None
+
+    async with runtime.sessions() as session:
+        room = await session.get(Room, room_id)
+        assert room.status == RoomStatus.FINISHED
+        assert room.current_round_id is None
+        assert room.consecutive_voided == 1
+        last = await session.get(Round, round_three)
+        assert last.status == RoundStatus.VOIDED
+        rows = list(
+            await session.scalars(select(Submission).where(Submission.round_id == round_three))
+        )
+        assert {row.status for row in rows} == {SubmissionStatus.FAILED}
+        assert all(row.rank_points == 0 for row in rows)
+
+    # RO-13: the finished room releases the owner slot immediately.
+    again = await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 15})
+    assert again.status_code == 201 and again.json()["slug"] != slug
+
+
+async def test_a_stranded_inference_is_failed_by_the_guard_and_never_blocks_the_round(network):
+    http, connect, apps = network
+    runtime = apps[0].state.resources
+    redis = runtime.redis
+    host, _, host_cookie = await http(0)
+    guest, _, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 15})).json()[
+        "slug"
+    ]
+    host_id = (
+        await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    ).json()["participantId"]
+    guest_id = (
+        await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "참가자"})
+    ).json()["participantId"]
+    host_socket, host_events = await connect(0, slug, host_cookie)
+    await connect(1, slug, guest_cookie)
+    await next_event(host_events, "joined")
+    await host.post(f"/api/rooms/{slug}/start")
+    first = await next_event(host_events, "revealed")
+    round_one = int(first["roundId"])
+    room_id = await _room_id(runtime.sessions, slug)
+
+    # One upload is scored, the other is still inside the engine when the deadline arrives.
+    await seed_submission(redis, round_one, int(host_id), status="submitted", score=70.0)
+    await redis.hset(round_key(round_one, "submitted"), str(guest_id), str(clock.now_ms()))
+    await fire_now(redis, "round_deadline", round_one)
+
+    async with asyncio.timeout(10):
+        while True:
+            if await due_at(redis, Job("round_scoring_guard", round_one)) is not None:
+                break
+            await asyncio.sleep(0.02)
+    async with runtime.sessions() as session:
+        current = await session.get(Round, round_one)
+        assert current.status == RoundStatus.SCORING  # §10.3 waits for the pending result
+
+    await fire_now(redis, "round_scoring_guard", round_one)
+    await wait_for_round(
+        runtime.sessions, room_id, lambda room, current: current.status == RoundStatus.FINALIZED
+    )
+
+    async with runtime.sessions() as session:
+        rows = {
+            row.participant_id: row
+            for row in await session.scalars(
+                select(Submission).where(Submission.round_id == round_one)
+            )
+        }
+        assert rows[int(guest_id)].status == SubmissionStatus.FAILED
+        assert rows[int(guest_id)].rank is None
+        # D-2: the stranded player is compensated with the awarded average, never penalised.
+        assert rows[int(guest_id)].rank_points == 100
+        assert rows[int(host_id)].rank_points == 100
+
+
+async def _room_id(sessions, slug):
+    async with sessions() as session:
+        room = await session.scalar(select(Room).where(Room.invite_slug == slug))
+        return room.id

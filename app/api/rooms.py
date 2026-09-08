@@ -134,8 +134,10 @@ async def start(slug: str, user: CurrentUser, runtime: Runtime) -> dict[str, boo
         # The row lock serialises a double tap and a concurrent join against one transition.
         room = await service.get_room(session, slug, lock=True)
         service.require_host(room, user.uuid)
-        await game.start_game(session, room)
+        current = await game.start_game(session, room)
         room_id = room.id
+    # The timer is armed only after the round row is committed, never before.
+    await runtime.rounds.schedule_deadline(current)
     if runtime.realtime is not None:
         await runtime.realtime.announce_round(room_id, started=True)
     return {"ok": True}
