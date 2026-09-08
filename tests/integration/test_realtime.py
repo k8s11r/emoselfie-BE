@@ -4,12 +4,14 @@ import json
 import socket
 from contextlib import AsyncExitStack
 from decimal import Decimal
+from io import BytesIO
 from uuid import uuid4
 
 import pytest
 import socketio
 import uvicorn
 from httpx import AsyncClient
+from PIL import Image
 from sqlalchemy import delete, select
 
 from app.core import clock
@@ -103,6 +105,9 @@ async def network(settings):
                 )
                 client.on("round:voided", lambda data: queue.put_nowait(("voided", data)))
                 client.on("game:finished", lambda data: queue.put_nowait(("finished", data)))
+                client.on("round:finalized", lambda data: queue.put_nowait(("finalized", data)))
+                client.on("submission:scored", lambda data: queue.put_nowait(("scored", data)))
+                client.on("submission:status", lambda data: queue.put_nowait(("subStatus", data)))
                 await client.connect(
                     f"http://127.0.0.1:{ports[pod]}?slug={slug}",
                     headers={"Cookie": f"{COOKIE_NAME}={cookie}"},
@@ -576,3 +581,157 @@ async def _room_id(sessions, slug):
     async with sessions() as session:
         room = await session.scalar(select(Room).where(Room.invite_slug == slug))
         return room.id
+
+
+def sample_jpeg(width=320, height=240, color=(200, 140, 90)):
+    with Image.new("RGB", (width, height), color) as image, BytesIO() as buffer:
+        image.save(buffer, format="JPEG", quality=80)
+        return buffer.getvalue()
+
+
+def multipart(image, boundary="emoselfie-test-boundary"):
+    body = (
+        (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="image"; filename="capture.jpg"\r\n'
+            "Content-Type: image/jpeg\r\n\r\n"
+        ).encode()
+        + image
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
+    return body, {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+
+
+async def upload(client, slug, round_id, token, image=None):
+    body, headers = multipart(image if image is not None else sample_jpeg())
+    return await client.post(
+        f"/api/rooms/{slug}/rounds/{round_id}/submissions",
+        content=body,
+        headers={**headers, "X-Capture-Token": token},
+    )
+
+
+async def test_uploads_are_scored_delivered_to_viewers_only_and_close_the_round(network):
+    http, connect, apps = network
+    runtime = apps[0].state.resources
+    host, _, host_cookie = await http(0)
+    guest, _, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 30})).json()[
+        "slug"
+    ]
+    host_id = (
+        await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    ).json()["participantId"]
+    guest_id = (
+        await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "참가자"})
+    ).json()["participantId"]
+    host_socket, host_events = await connect(0, slug, host_cookie)
+    guest_socket, guest_events = await connect(1, slug, guest_cookie)
+    await next_event(host_events, "joined")
+    await next_event(guest_events, "joined")
+    await host.post(f"/api/rooms/{slug}/start")
+    mine = await next_event(host_events, "revealed")
+    theirs = await next_event(guest_events, "revealed")
+    round_id = int(mine["roundId"])
+
+    accepted = await upload(host, slug, round_id, mine["captureToken"])
+    assert accepted.status_code == 202, accepted.text
+    body = accepted.json()
+    assert body["status"] == "processing" and body["submissionId"].isdigit()
+    assert body["acceptedAtMs"] < mine["deadlineAtMs"]
+
+    counted = await next_event(guest_events, "subStatus")
+    assert counted == {"roundId": str(round_id), "submitted": 1, "total": 2}
+    assert "targetScore" not in str(counted)  # RS-09
+
+    scored = await next_event(host_events, "scored")
+    assert scored["participantId"] == host_id and scored["submissionId"] == body["submissionId"]
+    assert scored["status"] == "submitted" and scored["scoredTotal"] == 2
+    assert scored["mediaToken"]
+    # RS-12: the guest has not submitted, so no result of any kind reaches them.
+    assert guest_events.qsize() == 0 or all(
+        event != "scored" for event, _ in list(guest_events._queue)
+    )
+
+    # CP-03·§8.3: the capture slot and token are single use.
+    repeated = await upload(host, slug, round_id, mine["captureToken"])
+    assert repeated.status_code == 403
+    assert repeated.json()["error"]["code"] == "INVALID_CAPTURE_TOKEN"
+    forged = await upload(guest, slug, round_id, mine["captureToken"])
+    assert forged.status_code == 403
+
+    # RD-07: the last upload closes the round early, without waiting for the deadline.
+    assert (await upload(guest, slug, round_id, theirs["captureToken"])).status_code == 202
+    guest_scored = await next_event(
+        guest_events, "scored", lambda data: data["participantId"] == guest_id
+    )
+    assert guest_scored["mediaToken"] != scored["mediaToken"]
+    assert (await host.get(f"/media/{guest_scored['mediaToken']}")).status_code == 403
+
+    finalized = await next_event(host_events, "finalized")
+    assert {entry["participantId"] for entry in finalized["results"]} == {host_id, guest_id}
+    assert all(entry["rank"] is not None for entry in finalized["results"])
+    assert finalized["viewingEndsAtMs"] > clock.now_ms()
+    await next_event(guest_events, "finalized")
+
+    # §8.4: the photo opens for the viewer it was issued to and for nobody else.
+    image = await host.get(f"/media/{scored['mediaToken']}")
+    assert image.status_code == 200
+    assert image.headers["content-type"] == "image/jpeg"
+    assert image.headers["cache-control"] == "private, no-store"
+    assert image.content.startswith(b"\xff\xd8")
+    assert (await guest.get(f"/media/{scored['mediaToken']}")).status_code == 403
+
+    async with runtime.sessions() as session:
+        rows = {
+            row.participant_id: row
+            for row in await session.scalars(
+                select(Submission).where(Submission.round_id == round_id)
+            )
+        }
+        assert rows[int(host_id)].status == SubmissionStatus.SUBMITTED
+        assert rows[int(host_id)].top_emotions[0]["label"] == "happy"
+        assert str(rows[int(host_id)].id) == body["submissionId"]
+
+    # PV-01: closing the round drops the cached photo before its safety TTL.
+    await fire_now(runtime.redis, "round_viewing_end", round_id)
+    await next_event(host_events, "revealed", lambda data: data["index"] == 2)
+    expired = await host.get(f"/media/{scored['mediaToken']}")
+    assert expired.status_code == 410 and expired.json()["error"]["code"] == "MEDIA_EXPIRED"
+
+
+async def test_uploads_are_rejected_after_the_deadline_and_over_the_size_limit(network):
+    http, connect, apps = network
+    runtime = apps[0].state.resources
+    host, _, host_cookie = await http(0)
+    guest, _, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 30})).json()[
+        "slug"
+    ]
+    await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "참가자"})
+    host_socket, host_events = await connect(0, slug, host_cookie)
+    await connect(1, slug, guest_cookie)
+    await next_event(host_events, "joined")
+    await host.post(f"/api/rooms/{slug}/start")
+    mine = await next_event(host_events, "revealed")
+    round_id = int(mine["roundId"])
+
+    # A body over 2MB is refused, and §8.3 spends the slot before the body is read.
+    oversized = await upload(
+        host, slug, round_id, mine["captureToken"], image=b"\xff\xd8" + b"0" * 2_200_000
+    )
+    assert oversized.status_code == 413
+    assert oversized.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
+
+    # A body that is not a JPEG is refused as unsupported media, not as a failure.
+    unsupported = await upload(guest, slug, round_id, "x" * 32)
+    assert unsupported.status_code == 403  # the forged token is rejected before the body
+
+    async with runtime.sessions() as session:
+        room = await session.scalar(select(Room).where(Room.invite_slug == slug))
+        room_id = room.id
+    await fire_now(runtime.redis, "round_deadline", round_id)
+    await wait_for_round(runtime.sessions, room_id, lambda room, current: current.index == 2)
+    stale = await upload(host, slug, round_id, mine["captureToken"])
+    assert stale.status_code == 409 and stale.json()["error"]["code"] == "NOT_CURRENT_ROUND"

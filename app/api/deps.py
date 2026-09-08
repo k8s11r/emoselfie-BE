@@ -1,4 +1,5 @@
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import Depends, Request
 
@@ -22,6 +23,15 @@ async def current_user(request: Request, runtime: Runtime) -> User:
 
 
 CurrentUser = Annotated[User, Depends(current_user)]
+
+
+def session_identity(request: Request) -> UUID:
+    """The cookie's UUID without touching the users table, for read-only media requests."""
+    identity: UUID = request.state.user_id
+    return identity
+
+
+SessionIdentity = Annotated[UUID, Depends(session_identity)]
 
 
 async def limit_ip(request: Request, scope: str, capacity: int, window_sec: int) -> None:

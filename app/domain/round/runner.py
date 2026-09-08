@@ -1,16 +1,24 @@
 """Drives one round through §10 by reacting to scheduler jobs. Events are emitted after commit."""
 
+import asyncio
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import clock
+from app.core.errors import AppError
+from app.core.redis import IMAGE_TTL_SEC, image_key
+from app.core.security import media_token
 from app.db.models import Participant, Room, Round
-from app.domain.enums import RoomStatus, RoundStatus
+from app.domain.enums import EmotionLabel, RoomStatus, RoundStatus, SubmissionStatus
 from app.domain.game.service import active_participants, open_round
 from app.domain.round import service
 from app.domain.scheduler.service import Job, cancel, schedule
-from app.realtime.emitter import PersonalEvent, RoomEvent, ViewerEvent
+from app.domain.scoring.service import target_score
+from app.inference.protocol import EmotionResult, InferenceError
+from app.media.images import decode_jpeg, encode_result_jpeg
+from app.realtime.emitter import PersonalEvent, PlayerEvent, RoomEvent, ViewerEvent
 
 if TYPE_CHECKING:
     from app.core.resources import Resources
@@ -21,6 +29,7 @@ Delivery = tuple[Participant, dict[str, Any]]
 class RoundRunner:
     def __init__(self, resources: "Resources") -> None:
         self.runtime = resources
+        self._tasks: set[asyncio.Task[None]] = set()
 
     async def handle(self, job: Job) -> None:
         if job.kind == "round_deadline":
@@ -80,16 +89,141 @@ class RoundRunner:
                 for member in active
                 if member.id in missed
             ]
-            pending = await service.pending_inference(self.runtime.redis, current.id)
-            if pending:
-                await schedule(
-                    self.runtime.redis,
-                    Job("round_scoring_guard", current.id),
-                    clock.now_ms() + service.SCORING_GUARD_SEC * 1000,
-                )
+        # The pending count is read only after `scoring` is committed. A result recorded
+        # before this read is counted here; one recorded after sees `scoring` and finalizes
+        # itself, so neither side can leave the round waiting for the guard.
+        pending = await service.pending_inference(self.runtime.redis, round_id)
+        if pending:
+            await schedule(
+                self.runtime.redis,
+                Job("round_scoring_guard", round_id),
+                clock.now_ms() + service.SCORING_GUARD_SEC * 1000,
+            )
         # D-4 stage one: a missed player learns the phase, never another player's score (RS-14).
         await self._send_personal("round:missed", missed_events)
         if not pending:
+            await self.finalize(round_id)
+
+    async def dispatch(
+        self, round_id: int, room_id: int, participant_id: int, submission_id: int, image: bytes
+    ) -> None:
+        """§8.3 ⑦~⑨. The response never waits for the engine."""
+        submitted = await service.submitted_count(self.runtime.redis, round_id)
+        async with self.runtime.sessions() as session:
+            total = len(await active_participants(session, room_id))
+        await self._send_players(
+            room_id,
+            "submission:status",
+            {"roundId": str(round_id), "submitted": submitted, "total": total},
+        )
+        task = asyncio.create_task(
+            self._score(round_id, room_id, participant_id, submission_id, image)
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        if submitted >= total:
+            # RD-07: a full house closes the round without waiting for the deadline.
+            await self.close_submissions(round_id)
+
+    async def _score(
+        self, round_id: int, room_id: int, participant_id: int, submission_id: int, image: bytes
+    ) -> None:
+        classifier = self.runtime.classifier
+        payload: dict[str, Any] = {"status": SubmissionStatus.FAILED.value}
+        try:
+            await self._store_image(round_id, participant_id, image)
+            if classifier is None:
+                raise InferenceError("Inference is unavailable")
+            result = await classifier.classify(image)
+            payload = self._result_payload(result, await self._target(round_id))
+        except (InferenceError, TimeoutError, AppError):
+            payload = {"status": SubmissionStatus.FAILED.value}
+        except asyncio.CancelledError:
+            payload = {"status": SubmissionStatus.FAILED.value}
+            raise
+        finally:
+            del image
+            await service.record_score(self.runtime.redis, round_id, participant_id, payload)
+            await self._announce_score(round_id, room_id, participant_id, submission_id, payload)
+            await self._finalize_if_resolved(round_id)
+
+    async def _target(self, round_id: int) -> EmotionLabel:
+        async with self.runtime.sessions() as session:
+            current = await session.get(Round, round_id)
+            if current is None:
+                raise InferenceError("The round disappeared before scoring")
+            return current.target_emotion
+
+    def _result_payload(self, result: EmotionResult, target: EmotionLabel) -> dict[str, Any]:
+        if not result.face_detected or result.probabilities is None:
+            return {"status": SubmissionStatus.NO_FACE.value, "targetScore": 0.0}  # SC-04
+        ranked = sorted(result.probabilities.items(), key=lambda item: -item[1])
+        return {
+            "status": SubmissionStatus.SUBMITTED.value,
+            "targetScore": float(target_score(result.probabilities[target])),
+            "topEmotions": [
+                {"label": label.value, "score": float(target_score(value))}
+                for label, value in ranked[:3]
+            ],
+        }
+
+    async def _store_image(self, round_id: int, participant_id: int, image: bytes) -> None:
+        """D-1: only the re-encoded result frame is cached, and only until the round ends."""
+        with decode_jpeg(
+            image,
+            max_bytes=self.runtime.settings.max_upload_bytes,
+            max_pixels=self.runtime.settings.max_image_pixels,
+        ) as decoded:
+            result = encode_result_jpeg(decoded)
+        await self.runtime.media_redis.set(
+            image_key(round_id, participant_id), result, ex=IMAGE_TTL_SEC
+        )
+
+    async def _announce_score(
+        self,
+        round_id: int,
+        room_id: int,
+        participant_id: int,
+        submission_id: int,
+        payload: dict[str, Any],
+    ) -> None:
+        async with self.runtime.sessions() as session:
+            owner = await session.get(Participant, participant_id)
+            current = await session.get(Round, round_id)
+            if owner is None or current is None:
+                return
+            active = len(await active_participants(session, room_id))
+        scored = await service.resolved_count(self.runtime.redis, round_id)
+        expires_at_ms = service.media_expiry_ms(current)
+        secret = self.runtime.settings.media_token_secret.get_secret_value()
+
+        def per_viewer(viewer: Participant) -> dict[str, Any]:
+            # RX-08: a photo exists even for no_face and failed, so every viewer gets a token.
+            return {
+                "roundId": str(round_id),
+                "submissionId": str(submission_id),
+                "participantId": str(participant_id),
+                "nickname": owner.nickname,
+                "colorTag": owner.color_tag,
+                "status": payload["status"],
+                "targetScore": payload.get("targetScore"),
+                "topEmotions": payload.get("topEmotions"),
+                "currentRank": None,
+                "mediaToken": media_token(
+                    round_id, submission_id, viewer.id, expires_at_ms, secret
+                ),
+                "scoredCount": scored,
+                "scoredTotal": active,
+            }
+
+        await self._send_viewers("submission:scored", round_id, per_viewer)
+
+    async def _finalize_if_resolved(self, round_id: int) -> None:
+        async with self.runtime.sessions() as session:
+            current = await session.get(Round, round_id)
+        if current is None or current.status != RoundStatus.SCORING:
+            return
+        if await service.pending_inference(self.runtime.redis, round_id) <= 0:
             await self.finalize(round_id)
 
     async def force_finalize(self, round_id: int) -> None:
@@ -184,12 +318,21 @@ class RoundRunner:
             if sid is not None:
                 await realtime.emitter.personal(event, sid, payload)
 
+    async def _send_players(
+        self, room_id: int, event: PlayerEvent, payload: dict[str, Any]
+    ) -> None:
+        if self.runtime.realtime is not None:
+            await self.runtime.realtime.send_players(room_id, event, payload)
+
     async def _send_room(self, event: RoomEvent, room_id: int, payload: dict[str, Any]) -> None:
         if self.runtime.realtime is not None:
             await self.runtime.realtime.emitter.room(event, room_id, payload)
 
     async def _send_viewers(
-        self, event: ViewerEvent, round_id: int, payload: dict[str, Any]
+        self,
+        event: ViewerEvent,
+        round_id: int,
+        payload: dict[str, Any] | Callable[[Participant], dict[str, Any]],
     ) -> None:
         if self.runtime.realtime is not None:
-            await self.runtime.realtime.emitter.viewers(event, round_id, payload)
+            await self.runtime.realtime.send_viewers(round_id, event, payload)

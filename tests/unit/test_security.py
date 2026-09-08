@@ -3,7 +3,14 @@ from uuid import uuid1, uuid4
 import pytest
 
 from app.core.errors import AppError
-from app.core.security import capture_token, sign_cookie, verify_capture_token, verify_cookie
+from app.core.security import (
+    capture_token,
+    media_token,
+    sign_cookie,
+    verify_capture_token,
+    verify_cookie,
+    verify_media_token,
+)
 from app.domain.user.service import normalize_nickname
 
 
@@ -70,3 +77,38 @@ def test_capture_tokens_differ_per_participant_and_never_reuse_the_cookie_secret
     assert mine != capture_token(
         87, 42, 1_788_800_000_000, settings.cookie_secret.get_secret_value()
     )
+
+
+def test_media_token_carries_the_viewer_and_expiry_it_was_signed_for(settings):
+    secret = settings.media_token_secret.get_secret_value()
+    token = media_token(87, 913, 42, 1_788_800_060_000, secret)
+
+    assert verify_media_token(token, secret) == (87, 913, 42, 1_788_800_060_000)
+    assert verify_media_token(token, "another" * 8) is None
+    # The viewer is inside the signature, so a leaked link opens for nobody else (§8.4).
+    assert media_token(87, 913, 43, 1_788_800_060_000, secret) != token
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "",
+        "no-dot",
+        "a.b",
+        "a" * 300,
+        "가.나",
+        "eyJ.tampered",
+    ],
+)
+def test_malformed_media_tokens_are_rejected(settings, token):
+    assert verify_media_token(token, settings.media_token_secret.get_secret_value()) is None
+
+
+def test_a_media_token_cannot_be_edited_without_the_secret(settings):
+    secret = settings.media_token_secret.get_secret_value()
+    token = media_token(87, 913, 42, 1_788_800_060_000, secret)
+    payload, signature = token.split(".")
+
+    forged = media_token(87, 913, 43, 1_788_800_060_000, "guess" * 8).split(".")[0]
+    assert verify_media_token(f"{forged}.{signature}", secret) is None
+    assert verify_media_token(f"{payload}.{'A' * 32}", secret) is None

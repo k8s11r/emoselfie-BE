@@ -58,11 +58,15 @@
   - 2026-09-08: 전처리를 upstream `pth_processing` 기준 구현과 교차 계산해 오차 없이 일치함을 확인했다(`test_preprocessing_matches_the_upstream_reference`). 저자 데모 이미지는 happy 0.97로 판정되어 라벨 순서를 고정했다. 얼굴 crop은 upstream의 face_mesh 랜드마크 박스가 아니라 BlazeFace 검출 박스를 사용하므로 crop 좌표까지 동일하지는 않다.
 - [x] `BE-013` (P0/L) 큐·Semaphore(초기 2)·전용 executor·5초 timeout·서킷 브레이커(최근 20건 80% 실패 시 60초) 구현; 실제 작업 종료 전 슬롯 해제로 동시성이 초과되지 않는지 검증 — §12.3
   - 2026-09-08: timeout·취소 시에도 네이티브 작업이 끝날 때까지 슬롯을 유지하고, 버려진 요청은 실행하지 않으며, 종료는 대기 작업을 거절하고 진행 중 작업을 배수한 뒤 엔진을 닫는다. 취소된 요청이 서킷을 오염시키지 않음도 확인했다(`test_runner.py`). 업로드 API 연결은 BE-014·016에서 이어진다.
-- [ ] `BE-014` (P0/L) body 읽기 전 서버 수신 시각 기록, 방/참여자/현재 라운드/상태 검증, deadline·개인 촬영 토큰·원자적 중복 접수 구현 — §6.3·8.3, CP-03·08~10, G-02·03
-- [ ] `BE-015` (P0/L) multipart 스트림 2MB 한도·Content-Length 없는 요청·실제 decode 검증·body 중단/413/415 정리 구현; 임시 파일 방지 및 비정상 이미지 열람 차단 — §8.3, G-03·10
-  - 2026-09-08 부분 구현: `media/images.py`의 바이트·픽셀 한도, JPEG 시그니처·다중 프레임·decompression bomb 거절, EXIF 회전 및 임시 파일 미사용, 결과 재인코딩 시 메타데이터 제거를 검증했다. multipart 스트림 한도와 body 중단 정리는 업로드 엔드포인트(BE-014)와 함께 구현한다.
-- [ ] `BE-016` (P0/M) 202/processing·submissionId·acceptedAtMs 반환, 재요청 기존 접수 복원·큐 투입 실패 처리 구현 — §8.3, G-02·08
-- [ ] `BE-017` (P0/L) 전체 프레임 JPEG 재인코딩·Redis TTL 180초·개인 mediaToken 발급/갱신·쿠키 소유/현재 열람 권한 확인·no-store·403/410 구현; Q-7 추가 반전/크롭 없음 — §8.4, PV-01·02, G-10
+- [x] `BE-014` (P0/L) body 읽기 전 서버 수신 시각 기록, 방/참여자/현재 라운드/상태 검증, deadline·개인 촬영 토큰·원자적 중복 접수 구현 — §6.3·8.3, CP-03·08~10, G-02·03
+  - 2026-09-08: 헤더 수신 직후 시각을 기록하고 방·참여자·현재 라운드·상태를 검증한 뒤 마감 비교→촬영 토큰 1회 사용 마킹→HSETNX 순서로 접수한다. 마감 후 요청은 슬롯을 소비하지 않는다. 실제 서버에서 중복 제출 403·지난 라운드 409를 검증했다. G-02의 재시도 계약은 미확정이다.
+- [x] `BE-015` (P0/L) multipart 스트림 2MB 한도·Content-Length 없는 요청·실제 decode 검증·body 중단/413/415 정리 구현; 임시 파일 방지 및 비정상 이미지 열람 차단 — §8.3, G-03·10
+  - 2026-09-08: Content-Length 유무와 무관하게 스트리밍 중 2MB에서 끊고, 임시 파일 없이 메모리에서만 multipart를 읽는다. 잘린 body와 JPEG가 아닌 payload는 415다. 접수는 §8.3 순서대로 body보다 먼저 끝나므로 413도 슬롯을 소비하며 이는 G-03 결정 대상이다.
+  - 2026-09-08 이전 부분 구현: `media/images.py`의 바이트·픽셀 한도, JPEG 시그니처·다중 프레임·decompression bomb 거절, EXIF 회전 및 임시 파일 미사용, 결과 재인코딩 시 메타데이터 제거를 검증했다. multipart 스트림 한도와 body 중단 정리는 업로드 엔드포인트(BE-014)와 함께 구현한다.
+- [x] `BE-016` (P0/M) 202/processing·submissionId·acceptedAtMs 반환, 재요청 기존 접수 복원·큐 투입 실패 처리 구현 — §8.3, G-02·08
+  - 2026-09-08: 접수 시 submissions 행을 만들어 안정적인 submissionId를 즉시 반환하고 202/processing·acceptedAtMs를 응답한다. 추론 실패·엔진 부재는 failed로 확정되어 라운드를 막지 않는다. 기존 접수 조회 API는 G-02 확정 후다.
+- [x] `BE-017` (P0/L) 전체 프레임 JPEG 재인코딩·Redis TTL 180초·개인 mediaToken 발급/갱신·쿠키 소유/현재 열람 권한 확인·no-store·403/410 구현; Q-7 추가 반전/크롭 없음 — §8.4, PV-01·02, G-10
+  - 2026-09-08: 전체 프레임을 메타데이터 없이 재인코딩해 이미지 Redis에 TTL 180초로 두고, 열람자별 mediaToken을 발급한다. 쿠키 소유자 확인·교차 사용 403·라운드 종료 후 410과 `private, no-store`를 실제 서버에서 검증했다. 토큰 만료는 마감+guard+최대 감상+10초의 상한이며 갱신 계약은 G-10이다.
 - [ ] `BE-018` (P0/M) 실제 모델 단일 사용자 업로드→결과 benchmark, 모델/장비·동시성·큐 대기·메모리 기록; 원본/crop 해제·no_face/오류·timeout 검증 — §21-D
   - 2026-09-08 부분 측정(Apple M3, 8 CPU, torch 1스레드, Python 3.11.16): 로드 1.41초·warmup 0.04초, 프로세스 RSS 47MB→454MB. 단일 추론 p50 24ms(375×375)~30ms(1440×1920). 1440×1920 12장 동시 제출은 concurrency 2에서 254ms에 완료됐다. no_face와 자원 해제는 `tests/model`로 검증했다. HTTP 업로드 구간을 포함한 종단 측정은 BE-014·016 이후로 남는다.
 
@@ -103,6 +107,7 @@
 - [ ] `BE-034` (P0/L) ZSet 250ms 스케줄러·원자적 claim·잠금·재실행/복구 구현; deadline/scoring_guard/viewing_end/participant_left/host_delegate/room_expire 잡 등록 — §10.4, G-09
   - 2026-09-08 부분 구현: ZSet 폴링·Lua ZREM 소유권·30초 잡 락·취소/재예약과 Pod별 루프를 구현하고, 실제 Redis에서 동시 claim 1회·핸들러 실패 격리·중복 발화 없음을 검증했다. deadline·scoring_guard·viewing_end를 등록한다. participant_left·host_delegate·room_expire와 G-09의 잡 유실 복구는 미구현이다.
 - [ ] `BE-035` (P0/L) 유효 제출 인정→viewers 가입·제출 수 알림·기존 결과 backlog, 비동기 scored 개인 토큰 발행 구현 — §8.3·13, RD-05·09, RS-01~05·09, G-03·04
+  - 2026-09-08 부분 구현: 제출 인정 즉시 viewers에 가입시키고 `submission:status`(수만)와 개인 mediaToken을 담은 `submission:scored`를 발행한다. 미제출자에게는 어떤 결과도 가지 않는다. 늦은 열람자 backlog와 currentRank는 G-04 확정 후다.
 - [ ] `BE-036` (P0/L) deadline/전원 제출 경쟁 시 scoring 1회 전환·missed 확정·missed→missedUpdate 2단계 알림 구현 — §10.2·13, RD-06·07, RS-11~14
   - 2026-09-08 부분 구현: deadline 잡의 scoring 1회 전환, 미제출자 확정과 `round:missed`·`round:missedUpdate` 2단계 알림을 구현했다. 알림은 남은 시간과 단계만 담는다. 전원 제출 조기 마감은 업로드 접수(BE-014)와 함께 붙인다.
 - [ ] `BE-037` (P0/M) 마감+8초 guard·늦은 추론 결과 폐기·전원 failed 무효·연속 3회 중단·정상 라운드 카운터 초기화·서킷 대기 구현 — §10.3·10.5, D-5
@@ -151,7 +156,7 @@ M2 완료 게이트: 실제 모델로 2인 완주, 결과 접근제어·누적 �
 선행: 보안/로그는 관련 API와 함께 적용한다. 실제 베타는 M3, 출시 검증은 M4 이후다.
 
 - [ ] `BE-060` (P0/M) Redis 토큰 버킷: 생성 IP 10/h·user 5/h, 조회 IP 30/min, 입장 IP 20/min, 업로드 participant 5/round, socket sid 30/10s 및 Retry-After — §16
-  - 2026-09-08: 방 생성/조회/입장 및 presence 소켓 명령의 원자적 토큰 버킷 구현. 업로드 및 후속 소켓 명령은 미연결.
+  - 2026-09-08: 방 생성/조회/입장, presence 소켓 명령, 업로드 참여자별 라운드 5회 버킷을 구현. 리액션·스킵 등 후속 소켓 명령은 미연결.
 - [ ] `BE-061` (P0/M) 구조화 로그 allowlist·UUID/이미지/base64/crop/face_box/토큰 차단·오류 경로 필터 테스트 — §17, ID-08, PV-05
 - [ ] `BE-062` (P0/M) §17의 추론/접수/확정/소켓/잡 지연/이미지 메모리 메트릭·대시보드/알림과 종단 성능 측정 연결
 - [ ] `BE-063` (P0/M) Docker·모델 RO mount·환경변수/Secret·1 worker·live/ready·graceful shutdown·CI 이미지 빌드 및 migration 실행 절차 — §8.5·20

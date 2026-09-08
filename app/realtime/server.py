@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from http.cookies import SimpleCookie
 from typing import TYPE_CHECKING, Any, cast
@@ -7,7 +7,7 @@ from urllib.parse import parse_qs
 from uuid import UUID
 
 import socketio
-from sqlalchemy import update
+from sqlalchemy import select, update
 from starlette.types import Receive, Scope, Send
 
 from app.core import clock
@@ -19,7 +19,8 @@ from app.db.models import Participant, Room, Round, User
 from app.domain.enums import ConnectionStatus, RoomStatus
 from app.domain.game import service as game
 from app.domain.room import service
-from app.realtime.emitter import Emitter
+from app.domain.round import service as round_service
+from app.realtime.emitter import Emitter, PlayerEvent, ViewerEvent
 
 if TYPE_CHECKING:
     from app.core.resources import Resources
@@ -228,6 +229,32 @@ class Realtime:
                     await self.emitter.personal("room:joined", sid, snapshot)
         for sid in disconnect_sids:
             await self.server.disconnect(sid)
+
+    async def send_viewers(
+        self,
+        round_id: int,
+        event: ViewerEvent,
+        payload: dict[str, Any] | Callable[[Participant], dict[str, Any]],
+    ) -> None:
+        """§13.1 blocks non-viewers physically. Room membership cannot follow a sid across
+        Pods, so the round's viewer set decides the recipients and each one is addressed
+        by its own sid. Per-viewer payloads (media tokens) need this anyway."""
+        viewers = await round_service.viewer_ids(self.runtime.redis, round_id)
+        if not viewers:
+            return
+        async with self.runtime.sessions() as session:
+            members = list(
+                await session.scalars(select(Participant).where(Participant.id.in_(viewers)))
+            )
+        for member in members:
+            sid = await self.current_sid(member)
+            if sid is None:
+                continue
+            body = payload(member) if callable(payload) else payload
+            await self.emitter.viewers(event, sid, body)
+
+    async def send_players(self, room_id: int, event: PlayerEvent, payload: dict[str, Any]) -> None:
+        await self.emitter.players(event, room_id, payload)
 
     async def announce_round(self, room_id: int, *, started: bool = False) -> None:
         """`game:started` reaches the whole room; `round:revealed` is personal (§13.2)."""

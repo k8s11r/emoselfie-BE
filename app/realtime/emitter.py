@@ -11,7 +11,8 @@ PersonalEvent = Literal[
     "round:missedUpdate",
 ]
 RoomEvent = Literal["game:started", "round:voided", "game:finished"]
-ViewerEvent = Literal["round:finalized", "round:closed"]
+ViewerEvent = Literal["round:finalized", "round:closed", "submission:scored"]
+PlayerEvent = Literal["submission:status"]
 PERSONAL_EVENTS = frozenset(
     (
         "room:joined",
@@ -23,7 +24,8 @@ PERSONAL_EVENTS = frozenset(
     )
 )
 ROOM_EVENTS = frozenset(("game:started", "round:voided", "game:finished"))
-VIEWER_EVENTS = frozenset(("round:finalized", "round:closed"))
+VIEWER_EVENTS = frozenset(("round:finalized", "round:closed", "submission:scored"))
+PLAYER_EVENTS = frozenset(("submission:status",))
 
 
 class Emitter:
@@ -43,8 +45,14 @@ class Emitter:
             raise ValueError("Unsupported room event")
         await self.server.emit(event, payload, room=f"r:{room_id}")
 
-    async def viewers(self, event: ViewerEvent, round_id: int, payload: dict[str, Any]) -> None:
-        """RS-12: only participants who earned the round's results ever join this channel."""
+    async def viewers(self, event: ViewerEvent, sid: str, payload: dict[str, Any]) -> None:
+        """RS-12: the caller resolved this sid from the round's viewer set, never from the room."""
         if event not in VIEWER_EVENTS:
             raise ValueError("Unsupported viewer event")
-        await self.server.emit(event, payload, room=f"rd:{round_id}:viewers")
+        await self.server.emit(event, payload, to=sid)
+
+    async def players(self, event: PlayerEvent, room_id: int, payload: dict[str, Any]) -> None:
+        """`r:{roomId}:players` carries submission counts only, never a score (RS-09)."""
+        if event not in PLAYER_EVENTS:
+            raise ValueError("Unsupported player event")
+        await self.server.emit(event, payload, room=f"r:{room_id}:players")

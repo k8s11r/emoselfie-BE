@@ -12,7 +12,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import clock
-from app.core.redis import ROUND_TTL_SEC, image_key, round_key
+from app.core.errors import AppError
+from app.core.redis import ROUND_TTL_SEC, capture_token_key, image_key, round_key
+from app.core.security import verify_capture_token
 from app.db.models import Participant, Room, Round, Submission
 from app.domain.enums import ParticipantStatus, RoomStatus, RoundStatus, SubmissionStatus
 from app.domain.game.service import MIN_PLAYERS, active_participants
@@ -28,6 +30,8 @@ from app.domain.scoring.service import (
 )
 
 SCORING_GUARD_SEC = 8
+CAPTURE_TOKEN_GRACE_SEC = 60
+MEDIA_GRACE_SEC = 10
 VIEWING_BASE_SEC = 10
 VIEWING_PER_VIEWER_SEC = 2
 VIEWING_MAX_SEC = 60
@@ -80,6 +84,98 @@ async def read_submissions(
     return tuple(submissions), details
 
 
+async def accept_submission(
+    client: Redis,
+    current: Round,
+    participant_id: int,
+    received_at_ms: int,
+    token: str | None,
+    secret: str,
+) -> None:
+    """§8.3 steps ③~⑤. The order is the requirement: a late request consumes no slot."""
+    deadline_ms = clock.to_epoch_ms(current.deadline_at)
+    if received_at_ms >= deadline_ms:
+        raise AppError("DEADLINE_PASSED")  # CP-10
+    if not verify_capture_token(token, current.id, participant_id, deadline_ms, secret):
+        raise AppError("INVALID_CAPTURE_TOKEN")
+    marked = await cast(
+        Awaitable[bool],
+        client.set(
+            capture_token_key(current.id, participant_id),
+            "1",
+            nx=True,
+            exat=deadline_ms // 1000 + CAPTURE_TOKEN_GRACE_SEC,
+        ),
+    )
+    if not marked:
+        raise AppError("INVALID_CAPTURE_TOKEN")  # CP-03: one capture session, one use
+    accepted = await cast(
+        Awaitable[bool],
+        client.hsetnx(round_key(current.id, "submitted"), str(participant_id), str(received_at_ms)),
+    )
+    if not accepted:
+        raise AppError("ALREADY_SUBMITTED")
+    await cast(Awaitable[bool], client.expire(round_key(current.id, "submitted"), ROUND_TTL_SEC))
+    # RS-12 §13.1: the result audience is joined the instant a submission is accepted.
+    await cast(Awaitable[int], client.sadd(round_key(current.id, "viewers"), str(participant_id)))
+    await cast(Awaitable[bool], client.expire(round_key(current.id, "viewers"), ROUND_TTL_SEC))
+
+
+async def create_submission_row(
+    session: AsyncSession, round_id: int, participant_id: int, received_at_ms: int
+) -> Submission:
+    """§8.3 returns a submissionId immediately, so the row is born with the acceptance.
+
+    It starts as `failed`, the same terminal state the scoring guard would assign, and the
+    finalize transaction settles it. G-08 must confirm this against D-8.
+    """
+    row = Submission(
+        round_id=round_id,
+        participant_id=participant_id,
+        status=SubmissionStatus.FAILED,
+        received_at=clock.from_epoch_ms(received_at_ms),
+        rank_points=0,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def record_score(
+    client: Redis, round_id: int, participant_id: int, payload: dict[str, Any]
+) -> None:
+    await cast(
+        Awaitable[int],
+        client.hset(round_key(round_id, "scores"), str(participant_id), json.dumps(payload)),
+    )
+    await cast(Awaitable[bool], client.expire(round_key(round_id, "scores"), ROUND_TTL_SEC))
+
+
+def media_expiry_ms(current: Round) -> int:
+    """§8.4 wants the viewing end plus ten seconds, which is unknown while scoring runs.
+
+    The deadline plus the guard, the longest possible viewing stage and that grace is the
+    tightest bound available at issue time. G-10 must confirm refresh or a shorter window.
+    """
+    return (
+        clock.to_epoch_ms(current.deadline_at)
+        + (SCORING_GUARD_SEC + VIEWING_MAX_SEC + MEDIA_GRACE_SEC) * 1000
+    )
+
+
+async def resolved_count(client: Redis, round_id: int) -> int:
+    return await cast(Awaitable[int], client.hlen(round_key(round_id, "scores")))
+
+
+async def submitted_count(client: Redis, round_id: int) -> int:
+    return await cast(Awaitable[int], client.hlen(round_key(round_id, "submitted")))
+
+
+async def viewer_ids(client: Redis, round_id: int) -> set[int]:
+    members = await cast(Awaitable[set[bytes]], client.smembers(round_key(round_id, "viewers")))
+    return {int(member) for member in members}
+
+
 async def close_submissions(session: AsyncSession, current: Round) -> bool:
     """§10.2. The deadline job and a full house race here; only one transition may win."""
     if current.status not in OPEN_STATUSES:
@@ -129,6 +225,12 @@ async def finalize_round(
     submissions, details = await read_submissions(client, current.id, active)
     outcome = score_round(submissions)
     by_id = {member.id: member for member in active}
+    existing = {
+        row.participant_id: row
+        for row in await session.scalars(
+            select(Submission).where(Submission.round_id == current.id)
+        )
+    }
     added: dict[int, Submission] = {}
     totals: dict[int, int] = {}
     for result in outcome.results:
@@ -136,17 +238,18 @@ async def finalize_round(
         if member is None:
             # A participant who left after submitting keeps no place in this round's ledger.
             continue
-        row = Submission(
-            round_id=current.id,
-            participant_id=result.participant_id,
-            status=result.status,
-            received_at=_received_at(submissions, result),
-            target_score=result.target_score,
-            top_emotions=details.get(result.participant_id, {}).get("topEmotions"),
-            rank=result.rank,
-            rank_points=result.rank_points,
+        # An accepted upload already owns a row and its id; finalize only settles the result.
+        row = existing.get(result.participant_id) or Submission(
+            round_id=current.id, participant_id=result.participant_id
         )
-        session.add(row)
+        row.status = result.status
+        row.received_at = _received_at(submissions, result)
+        row.target_score = result.target_score
+        row.top_emotions = details.get(result.participant_id, {}).get("topEmotions")
+        row.rank = result.rank
+        row.rank_points = result.rank_points
+        if result.participant_id not in existing:
+            session.add(row)
         added[result.participant_id] = row
         if not outcome.voided:
             updated = accumulate(

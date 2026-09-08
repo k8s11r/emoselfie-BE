@@ -84,3 +84,9 @@ class LobbyState(WireModel):
     participants: list[ParticipantView]
     game: None = None
     server_time_ms: int
+
+
+class SubmissionAccepted(WireModel):
+    submission_id: PublicId
+    accepted_at_ms: int
+    status: Literal["processing"] = "processing"

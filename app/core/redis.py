@@ -28,7 +28,9 @@ def room_key(room_id: int, kind: Literal["presence", "tempHost"]) -> str:
     return f"room:{room_id}:{kind}"
 
 
-def round_key(round_id: int, kind: Literal["submitted", "scores", "skips", "rx:actors"]) -> str:
+def round_key(
+    round_id: int, kind: Literal["submitted", "scores", "skips", "viewers", "rx:actors"]
+) -> str:
     return f"round:{round_id}:{kind}"
 
 

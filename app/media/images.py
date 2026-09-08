@@ -45,3 +45,21 @@ def encode_result_jpeg(image: Image.Image) -> bytes:
 def sanitize_jpeg(data: bytes, *, max_bytes: int = 2097152, max_pixels: int = 4194304) -> bytes:
     with decode_jpeg(data, max_bytes=max_bytes, max_pixels=max_pixels) as image:
         return encode_result_jpeg(image)
+
+
+def inspect_jpeg(
+    data: bytes, *, max_bytes: int = 2097152, max_pixels: int = 4194304
+) -> tuple[int, int]:
+    """Header-only check for the accept path. The full decode still happens in the engine."""
+    if len(data) > max_bytes:
+        raise AppError("PAYLOAD_TOO_LARGE")
+    if not data.startswith(b"\xff\xd8"):
+        raise AppError("UNSUPPORTED_MEDIA")
+    try:
+        with BytesIO(data) as stream, Image.open(stream, formats=["JPEG"]) as source:
+            size = source.size
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError):
+        raise AppError("UNSUPPORTED_MEDIA") from None
+    if size[0] * size[1] > max_pixels:
+        raise AppError("PAYLOAD_TOO_LARGE")
+    return size

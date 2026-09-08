@@ -15,7 +15,9 @@ class SessionMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or not scope["path"].startswith("/api/"):
+        # `/media` needs the same cookie identity, but it never mints or refreshes one.
+        api = scope["type"] == "http" and scope["path"].startswith("/api/")
+        if not api and not (scope["type"] == "http" and scope["path"].startswith("/media/")):
             await self.app(scope, receive, send)
             return
         settings = scope["app"].state.resources.settings
@@ -42,11 +44,14 @@ class SessionMiddleware:
             identity = None
         user_id, refresh = identity if identity is not None else (uuid4(), True)
         scope.setdefault("state", {})["user_id"] = user_id
+        scope["state"]["authenticated"] = identity is not None
+        refresh = refresh and api
 
         async def send_with_cookie(message: Message) -> None:
             if message["type"] == "http.response.start":
                 response_headers = MutableHeaders(scope=message)
-                response_headers["Cache-Control"] = "no-store"
+                if api:
+                    response_headers["Cache-Control"] = "no-store"
                 if refresh:
                     cookie_response = Response()
                     cookie_response.set_cookie(

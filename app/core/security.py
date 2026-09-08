@@ -54,3 +54,35 @@ def verify_capture_token(
     return hmac.compare_digest(
         capture_token(round_id, participant_id, deadline_at_ms, secret), token
     )
+
+
+def media_token(
+    round_id: int, submission_id: int, viewer_participant_id: int, expires_at_ms: int, secret: str
+) -> str:
+    """§8.4. Personal per viewer, so a leaked link opens for nobody else."""
+    payload = f"{round_id}:{submission_id}:{viewer_participant_id}:{expires_at_ms}"
+    signature = hmac.digest(secret.encode(), payload.encode(), "sha256")
+    return (
+        base64.urlsafe_b64encode(payload.encode()).rstrip(b"=").decode("ascii")
+        + "."
+        + base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")[:32]
+    )
+
+
+def verify_media_token(token: str, secret: str) -> tuple[int, int, int, int] | None:
+    """Returns roundId, submissionId, viewerParticipantId and expiry, or None when untrusted."""
+    if len(token) > 256 or not token.isascii() or token.count(".") != 1:
+        return None
+    encoded, signature = token.split(".", 1)
+    try:
+        payload = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("ascii")
+        round_id, submission_id, viewer_id, expires_at_ms = (
+            int(part) for part in payload.split(":")
+        )
+    except (ValueError, UnicodeDecodeError):
+        return None
+    expected = hmac.digest(secret.encode(), payload.encode(), "sha256")
+    encoded_signature = base64.urlsafe_b64encode(expected).rstrip(b"=").decode("ascii")[:32]
+    if not hmac.compare_digest(encoded_signature, signature):
+        return None
+    return round_id, submission_id, viewer_id, expires_at_ms
