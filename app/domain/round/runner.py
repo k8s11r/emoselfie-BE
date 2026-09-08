@@ -13,6 +13,7 @@ from app.core.security import media_token
 from app.db.models import Participant, Room, Round
 from app.domain.enums import EmotionLabel, RoomStatus, RoundStatus, SubmissionStatus
 from app.domain.game.service import active_participants, open_round
+from app.domain.reaction import service as reactions
 from app.domain.round import service
 from app.domain.scheduler.service import Job, cancel, schedule
 from app.domain.scoring.service import target_score
@@ -30,6 +31,17 @@ class RoundRunner:
     def __init__(self, resources: "Resources") -> None:
         self.runtime = resources
         self._tasks: set[asyncio.Task[None]] = set()
+
+    async def shutdown(self) -> None:
+        """Graceful shutdown waits for in-flight scoring so a result is never half written."""
+        pending = list(self._tasks)
+        if not pending:
+            return
+        done, unfinished = await asyncio.wait(pending, timeout=5)
+        for task in unfinished:
+            task.cancel()
+        if unfinished:
+            await asyncio.wait(unfinished, timeout=5)
 
     async def handle(self, job: Job) -> None:
         if job.kind == "round_deadline":
@@ -286,6 +298,7 @@ class RoundRunner:
         """§10.5·10.6. Close the round, then open the next one or finish the game."""
         finished: dict[str, Any] | None = None
         next_round = False
+        next_round_at_ms = 0
         async with self.runtime.sessions.begin() as session:
             loaded = await self._load(session, round_id)
             if loaded is None:
@@ -293,7 +306,11 @@ class RoundRunner:
             room, current = loaded
             if current.status not in (RoundStatus.FINALIZED, RoundStatus.VOIDED):
                 return
-            await service.close_round(session, self.runtime.media_redis, current)
+            voided = current.status == RoundStatus.VOIDED
+            reaction_totals = await service.close_round(
+                session, self.runtime.redis, self.runtime.media_redis, current
+            )
+            results, totals, rows = await service.settled_results(session, current.id)
             room_id = room.id
             reason = await service.abort_reason(session, room)
             following = service.next_index(room, current)
@@ -303,7 +320,23 @@ class RoundRunner:
                 upcoming = await open_round(session, room, following)
                 await self.schedule_deadline(upcoming)
                 next_round = True
+                next_round_at_ms = clock.to_epoch_ms(upcoming.revealed_at)
+            closed_payload = (
+                None
+                if voided
+                else service.closed_view(
+                    current,
+                    totals,
+                    reaction_totals,
+                    rows,
+                    results,
+                    next_round_at_ms if next_round else clock.now_ms(),
+                )
+            )
         await cancel(self.runtime.redis, Job("round_viewing_end", round_id))
+        if closed_payload is not None:
+            await self._send_viewers("round:closed", round_id, closed_payload)
+        await reactions.drop(self.runtime.redis, round_id)
         if finished is not None:
             await self._send_room("game:finished", room_id, finished)
         elif next_round and self.runtime.realtime is not None:

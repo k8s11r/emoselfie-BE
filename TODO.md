@@ -127,9 +127,12 @@
   - 2026-09-08 부분 구현: 제출·포인트·best_round_score·라운드 상태를 한 트랜잭션에 반영하고, scoring 상태 CAS로 재실행 시 중복 누적을 막는다. 커밋 후 이벤트 유실 복구는 G-09와 함께 남는다.
 - [ ] `BE-042` (P0/M) 최종 순위(-totalPoints,-bestRoundScore,joinedAt)·mostLoved/동수/null, 중단 reason 및 전원 game:finished 구현 — §11.4, SC-06, RX-11, FN-01~03
   - 2026-09-08 부분 구현: 최종 순위·mostLoved·중단 reason과 전원 `game:finished` 발행, 종료 시 소유 슬롯 반환을 구현했다. 리액션 누적은 아직 0이므로 mostLoved는 항상 null이며 BE-043 이후 실제 값이 된다.
-- [ ] `BE-043` (P0/L) 리액션 수신 권한·채점 확정·자기 사진 금지·like/question 독립 토글·원자적 카운트·중복 명령 방어 구현 — §13.2, RX-01~09, G-02
-- [ ] `BE-044` (P0/M) 감상 시간 min(60,10+viewers×2)·서버 종료 시각·스킵 토글·connected viewers 분모·방장 즉시 종료 구현 — §10.3, RS-08·15, G-07
-- [ ] `BE-045` (P0/L) 종료/투표 경합 직렬화·closed 리액션 최종 DB 저장·집계/종료 snapshot·종료 후 명령 거부 구현 — RX-10, G-08
+- [x] `BE-043` (P0/L) 리액션 수신 권한·채점 확정·자기 사진 금지·like/question 독립 토글·원자적 카운트·중복 명령 방어 구현 — §13.2, RX-01~09, G-02
+  - 2026-09-08: §13.2의 검증 순서(열람자→마감 여부→채점 확정→자기 사진)를 그대로 구현하고, Lua 한 번으로 토글과 카운트를 원자적으로 처리한다. `reaction:updated`는 수만 담고 누가 눌렀는지는 담지 않는다. 실제 서버에서 자기 리액션 403·토글·독립 카운트·종료 후 거부를 검증했다.
+- [x] `BE-044` (P0/M) 감상 시간 min(60,10+viewers×2)·서버 종료 시각·스킵 토글·connected viewers 분모·방장 즉시 종료 구현 — §10.3, RS-08·15, G-07
+  - 2026-09-08: 감상 시간과 종료 시각을 서버가 정하고, 스킵은 토글이며 분모는 현재 연결된 열람자다. 방장 스킵은 분모와 무관하게 즉시 종료한다. 미제출자는 열람자가 아니라 분모에서 자동 제외된다. G-07의 스킵 단계 경계 합의는 남아 있다.
+- [x] `BE-045` (P0/L) 종료/투표 경합 직렬화·closed 리액션 최종 DB 저장·집계/종료 snapshot·종료 후 명령 거부 구현 — RX-10, G-08
+  - 2026-09-08: 종료 트랜잭션이 방 행 잠금 아래에서 리액션·스킵을 DB로 확정하고 `round:closed`에 리액션과 결과 스냅샷을 함께 싣는다. 종료 후 리액션은 REACTION_CLOSED다. 커밋 후 이벤트 유실 복구는 G-09다.
 - [ ] `BE-046` (P0/M) 정상/무효/강제 종료마다 img 키 즉시 삭제·토큰 무효·viewers 정리; TTL 이전에도 `/media` 410 검증 — PV-01·02
 - [ ] `BE-047` (P0/L) 결과 REST/이벤트/media 공통 권한 테스트: 비참여자·대기자·미제출자·퇴장자·타 방 사용자·토큰 교차 사용 차단 — PM-07, RS-12, G-03·06·10
 - [ ] `BE-048` (P0/M) FE B-1~12 정상/오류 fixture contract test 및 늦은 열람자 backlog·전체 순서·processing 상태 검증
@@ -160,6 +163,7 @@ M2 완료 게이트: 실제 모델로 2인 완주, 결과 접근제어·누적 �
 - [ ] `BE-061` (P0/M) 구조화 로그 allowlist·UUID/이미지/base64/crop/face_box/토큰 차단·오류 경로 필터 테스트 — §17, ID-08, PV-05
 - [ ] `BE-062` (P0/M) §17의 추론/접수/확정/소켓/잡 지연/이미지 메모리 메트릭·대시보드/알림과 종단 성능 측정 연결
 - [ ] `BE-063` (P0/M) Docker·모델 RO mount·환경변수/Secret·1 worker·live/ready·graceful shutdown·CI 이미지 빌드 및 migration 실행 절차 — §8.5·20
+  - 2026-09-08 확인: Socket.IO 연결이 하나라도 살아 있으면 Uvicorn graceful shutdown이 무한 대기한다. 연결 종료는 lifespan shutdown에서 하는데 Uvicorn은 연결이 닫힌 뒤에 lifespan을 내리기 때문이다. 배포에 `timeout_graceful_shutdown`을 반드시 설정해야 하며, 통합 테스트는 2초로 재현·검증한다.
   - 2026-09-08 확인: 현재 lock은 Linux에서 torch의 CUDA 휠과 nvidia 패키지 34개를 함께 해석한다. 서버는 CPU만 사용하므로 이미지 크기와 CI 시간을 위해 `download.pytorch.org/whl/cpu` 인덱스를 Linux에 한정해 고정하고 lock을 재생성해야 한다. 그 뒤에 `--run-model`을 실행하는 CI 잡을 추가한다.
 - [ ] `BE-064` (P0/L) Infra와 동일 오리진 TLS·Socket.IO 다중 Pod 연결 방식·프록시 수신 시각/body buffering·임시 파일·Redis 별도 인스턴스/persistence/메모리 상한 검증 — G-10, PM-14, PV-05
 - [ ] `BE-065` (P0/L) FE와 iOS Safari/Android Chrome 실제 기기, Wi-Fi↔LTE·background·권한 철회·2명/12명 검증; 오프라인 모임 3회 이상 베타 기록 — M4, §21-E

@@ -18,6 +18,7 @@ from app.core.security import verify_capture_token
 from app.db.models import Participant, Room, Round, Submission
 from app.domain.enums import ParticipantStatus, RoomStatus, RoundStatus, SubmissionStatus
 from app.domain.game.service import MIN_PLAYERS, active_participants
+from app.domain.reaction import service as reactions
 from app.domain.scoring.service import (
     ParticipantTotals,
     RoundOutcome,
@@ -326,11 +327,64 @@ def finalized_view(current: Round, finalized: Finalized) -> dict[str, Any]:
     }
 
 
-async def close_round(session: AsyncSession, media: Redis, current: Round) -> None:
+async def close_round(
+    session: AsyncSession, client: Redis, media: Redis, current: Round
+) -> dict[int, tuple[int, int]]:
+    """RX-10: the reaction snapshot at close is what PostgreSQL keeps."""
+    totals = await reactions.persist(session, client, current.id)
     if current.status == RoundStatus.FINALIZED:
         current.status = RoundStatus.CLOSED
         current.closed_at = clock.now_utc()
     await drop_round_media(session, media, current)
+    return totals
+
+
+def closed_view(
+    current: Round,
+    finalized_totals: dict[int, int],
+    reaction_totals: dict[int, tuple[int, int]],
+    rows: dict[int, int],
+    results: tuple[ScoredSubmission, ...],
+    next_round_at_ms: int,
+) -> dict[str, Any]:
+    return {
+        "roundId": str(current.id),
+        "reactions": [
+            {"submissionId": str(submission_id), "like": likes, "question": questions}
+            for submission_id, (likes, questions) in sorted(reaction_totals.items())
+        ],
+        # Idempotent replay of round:finalized so a late reconnect can catch up at once.
+        "results": [
+            {
+                "participantId": str(result.participant_id),
+                "rankPoints": result.rank_points,
+                "totalPoints": finalized_totals.get(result.participant_id, 0),
+            }
+            for result in results
+        ],
+        "nextRoundAtMs": next_round_at_ms,
+    }
+
+
+async def settled_results(
+    session: AsyncSession, round_id: int
+) -> tuple[tuple[ScoredSubmission, ...], dict[int, int], dict[int, int]]:
+    rows = list(await session.scalars(select(Submission).where(Submission.round_id == round_id)))
+    results = tuple(
+        ScoredSubmission(
+            participant_id=row.participant_id,
+            status=row.status,
+            rank=row.rank,
+            rank_points=row.rank_points,
+            target_score=row.target_score,
+        )
+        for row in rows
+    )
+    totals = {}
+    for row in rows:
+        member = await session.get(Participant, row.participant_id)
+        totals[row.participant_id] = member.total_points if member is not None else 0
+    return results, totals, {row.participant_id: row.id for row in rows}
 
 
 async def drop_round_media(session: AsyncSession, media: Redis, current: Round) -> None:

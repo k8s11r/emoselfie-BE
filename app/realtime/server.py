@@ -13,11 +13,19 @@ from starlette.types import Receive, Scope, Send
 from app.core import clock
 from app.core.errors import AppError
 from app.core.ratelimit import enforce_limit
-from app.core.redis import PRESENCE_TTL_SEC, SOCKET_TTL_SEC, room_key, socket_key, user_socket_key
+from app.core.redis import (
+    PRESENCE_TTL_SEC,
+    SOCKET_TTL_SEC,
+    room_key,
+    round_key,
+    socket_key,
+    user_socket_key,
+)
 from app.core.security import COOKIE_NAME, verify_cookie
-from app.db.models import Participant, Room, Round, User
-from app.domain.enums import ConnectionStatus, RoomStatus
+from app.db.models import Participant, Room, Round, Submission, User
+from app.domain.enums import ConnectionStatus, ReactionType, RoomStatus, RoundStatus
 from app.domain.game import service as game
+from app.domain.reaction import service as reactions
 from app.domain.room import service
 from app.domain.round import service as round_service
 from app.realtime.emitter import Emitter, PlayerEvent, ViewerEvent
@@ -74,6 +82,8 @@ class Realtime:
         self.server.on("connect", self.connect)
         self.server.on("disconnect", self.disconnect)
         self.server.on("presence:ping", self.ping)
+        self.server.on("reaction:sent", self.react)
+        self.server.on("round:skip", self.skip)
 
     async def connect(self, sid: str, environ: dict[str, Any], auth: Any = None) -> bool:
         old_room_id: int | None = None
@@ -197,6 +207,120 @@ class Realtime:
             return exc.socket_ack()
         except Exception:
             return AppError("SERVICE_UNAVAILABLE").socket_ack()
+
+    async def _context(self, sid: str) -> dict[bytes, bytes]:
+        context: dict[bytes, bytes] = await self.runtime.redis.hgetall(socket_key(sid))
+        if not context:
+            raise AppError("NOT_A_PARTICIPANT")
+        return context
+
+    async def react(self, sid: str, data: Any = None) -> dict[str, Any]:
+        """§13.2 `reaction:sent`. The validation order is the requirement (RX-05~08·10)."""
+        try:
+            await enforce_limit(self.runtime.redis, "socket", sid, capacity=30, window_sec=10)
+            context = await self._context(sid)
+            actor_id = int(context[b"participantId"])
+            payload = data if isinstance(data, dict) else {}
+            try:
+                submission_id = int(payload["submissionId"])
+                reaction_type = ReactionType(payload["type"])
+            except (KeyError, TypeError, ValueError):
+                raise AppError("INVALID_REQUEST") from None
+            async with self.runtime.sessions() as session:
+                target = await session.get(Submission, submission_id)
+                if target is None:
+                    raise AppError("NOT_A_VIEWER")
+                current = await session.get(Round, target.round_id)
+                if current is None:
+                    raise AppError("NOT_A_VIEWER")
+                round_id, owner_id = current.id, target.participant_id
+                closed = current.status in (RoundStatus.CLOSED, RoundStatus.VOIDED)
+            if actor_id not in await round_service.viewer_ids(self.runtime.redis, round_id):
+                raise AppError("NOT_A_VIEWER")  # RX-07
+            if closed:
+                raise AppError("REACTION_CLOSED")  # RX-10
+            resolved = await self.runtime.redis.hexists(
+                round_key(round_id, "scores"), str(owner_id)
+            )
+            if not resolved:
+                raise AppError("NOT_SCORED_YET")  # RX-06, decided means settled, not successful
+            if owner_id == actor_id:
+                raise AppError("SELF_REACTION")  # RX-05
+            await reactions.toggle_reaction(
+                self.runtime.redis, round_id, submission_id, actor_id, reaction_type
+            )
+            likes, questions = await reactions.count_for(
+                self.runtime.redis, round_id, submission_id
+            )
+            # RX-09: the update says how many, never who.
+            await self.send_viewers(
+                round_id,
+                "reaction:updated",
+                {
+                    "roundId": str(round_id),
+                    "submissionId": str(submission_id),
+                    "like": likes,
+                    "question": questions,
+                },
+            )
+            return {"ok": True}
+        except AppError as exc:
+            return exc.socket_ack()
+        except Exception:
+            return AppError("SERVICE_UNAVAILABLE").socket_ack()
+
+    async def skip(self, sid: str, data: Any = None) -> dict[str, Any]:
+        """§10.3 RS-15. The host ends the viewing stage alone; everyone else votes."""
+        try:
+            await enforce_limit(self.runtime.redis, "socket", sid, capacity=30, window_sec=10)
+            context = await self._context(sid)
+            participant_id = int(context[b"participantId"])
+            room_id = int(context[b"roomId"])
+            async with self.runtime.sessions() as session:
+                room = await session.get(Room, room_id)
+                if room is None or room.current_round_id is None:
+                    raise AppError("NOT_CURRENT_ROUND")
+                current = await session.get(Round, room.current_round_id)
+                if current is None or current.status != RoundStatus.FINALIZED:
+                    raise AppError("NOT_CURRENT_ROUND")
+                me = await session.get(Participant, participant_id)
+                if me is None:
+                    raise AppError("NOT_A_PARTICIPANT")
+                round_id = current.id
+                is_host = room.host_user_id == me.user_id
+            viewers = await round_service.viewer_ids(self.runtime.redis, round_id)
+            if participant_id not in viewers:
+                raise AppError("NOT_A_VIEWER")
+            await reactions.toggle_skip(self.runtime.redis, round_id, participant_id)
+            voters = await reactions.skip_voters(self.runtime.redis, round_id)
+            connected = await self.connected_viewers(round_id, viewers)
+            await self.send_viewers(
+                round_id,
+                "round:skipStatus",
+                {
+                    "roundId": str(round_id),
+                    "skipped": len(voters & connected),
+                    "total": len(connected),
+                },
+            )
+            # RS-08: a host skip ends viewing at once; otherwise every connected viewer must vote.
+            if is_host or (connected and voters >= connected):
+                await self.runtime.rounds.advance(round_id)
+            return {"ok": True}
+        except AppError as exc:
+            return exc.socket_ack()
+        except Exception:
+            return AppError("SERVICE_UNAVAILABLE").socket_ack()
+
+    async def connected_viewers(self, round_id: int, viewers: set[int]) -> set[int]:
+        """RS-15 denominator: viewers currently holding a socket, so a full skip stays reachable."""
+        if not viewers:
+            return set()
+        async with self.runtime.sessions() as session:
+            members = list(
+                await session.scalars(select(Participant).where(Participant.id.in_(viewers)))
+            )
+        return {member.id for member in members if await self.current_sid(member) is not None}
 
     async def current_sid(self, participant: Participant) -> str | None:
         value = await self.runtime.redis.get(user_socket_key(str(participant.user_id)))

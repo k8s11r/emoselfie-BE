@@ -85,6 +85,7 @@ class Resources:
             if self.scheduler is not None:
                 await self.scheduler.stop()
                 self.scheduler = None
+            await self.rounds.shutdown()
             if self.realtime is not None:
                 await self.realtime.shutdown()
                 self.realtime = None

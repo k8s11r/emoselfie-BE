@@ -30,7 +30,7 @@ from app.core.security import (
     sign_cookie,
     verify_capture_token,
 )
-from app.db.models import Participant, Room, Round, Submission, User
+from app.db.models import Participant, Reaction, Room, Round, RoundSkip, Submission, User
 from app.domain.enums import ConnectionStatus, RoomStatus, RoundStatus, SubmissionStatus
 from app.domain.scheduler.service import Job, due_at, schedule
 from app.main import create_app
@@ -60,6 +60,9 @@ async def network(settings):
                         ws="wsproto",
                         proxy_headers=True,
                         forwarded_allow_ips="127.0.0.1",
+                        # Deployment needs the same bound: a live Socket.IO connection would
+                        # otherwise hold graceful shutdown open forever (BE-063).
+                        timeout_graceful_shutdown=2,
                     )
                 )
                 task = asyncio.create_task(server.serve(sockets=[listener]))
@@ -106,6 +109,9 @@ async def network(settings):
                 client.on("round:voided", lambda data: queue.put_nowait(("voided", data)))
                 client.on("game:finished", lambda data: queue.put_nowait(("finished", data)))
                 client.on("round:finalized", lambda data: queue.put_nowait(("finalized", data)))
+                client.on("round:closed", lambda data: queue.put_nowait(("closed_round", data)))
+                client.on("reaction:updated", lambda data: queue.put_nowait(("reaction", data)))
+                client.on("round:skipStatus", lambda data: queue.put_nowait(("skipStatus", data)))
                 client.on("submission:scored", lambda data: queue.put_nowait(("scored", data)))
                 client.on("submission:status", lambda data: queue.put_nowait(("subStatus", data)))
                 await client.connect(
@@ -122,11 +128,14 @@ async def network(settings):
                 if client.connected:
                     await client.disconnect()
                 await client.shutdown()
+            # Idle keep-alive connections delay Uvicorn's graceful shutdown, so close them first.
+            for http_client in clients:
+                await http_client.aclose()
             # Graceful Uvicorn shutdown waits for network handlers before closing resources.
             for server in servers:
                 server.should_exit = True
             for task in tasks:
-                await asyncio.wait_for(task, timeout=5)
+                await asyncio.wait_for(task, timeout=15)
             for listener in listeners:
                 listener.close()
             # Resources are closed now; use a separate test-owned connection for row cleanup.
@@ -735,3 +744,177 @@ async def test_uploads_are_rejected_after_the_deadline_and_over_the_size_limit(n
     await wait_for_round(runtime.sessions, room_id, lambda room, current: current.index == 2)
     stale = await upload(host, slug, round_id, mine["captureToken"])
     assert stale.status_code == 409 and stale.json()["error"]["code"] == "NOT_CURRENT_ROUND"
+
+
+async def play_round(http_clients, sockets, slug, runtime, index=1):
+    """Both players upload, so the round finalizes and enters its viewing stage."""
+    host, guest = http_clients
+    host_events, guest_events = sockets
+    mine = await next_event(host_events, "revealed", lambda data: data["index"] == index)
+    theirs = await next_event(guest_events, "revealed", lambda data: data["index"] == index)
+    round_id = int(mine["roundId"])
+    first = await upload(host, slug, round_id, mine["captureToken"])
+    second = await upload(guest, slug, round_id, theirs["captureToken"])
+    assert (first.status_code, second.status_code) == (202, 202)
+    await next_event(host_events, "finalized")
+    await next_event(guest_events, "finalized")
+    return round_id, first.json()["submissionId"], second.json()["submissionId"]
+
+
+async def test_reactions_toggle_do_not_move_scores_and_are_stored_when_the_round_closes(network):
+    http, connect, apps = network
+    runtime = apps[0].state.resources
+    host, _, host_cookie = await http(0)
+    guest, _, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 30})).json()[
+        "slug"
+    ]
+    host_id = (
+        await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    ).json()["participantId"]
+    await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "참가자"})
+    host_socket, host_events = await connect(0, slug, host_cookie)
+    guest_socket, guest_events = await connect(1, slug, guest_cookie)
+    await next_event(host_events, "joined")
+    await next_event(guest_events, "joined")
+    await host.post(f"/api/rooms/{slug}/start")
+    round_id, host_submission, guest_submission = await play_round(
+        (host, guest), (host_events, guest_events), slug, runtime
+    )
+
+    # RX-05: the owner cannot react to their own photo.
+    assert await host_socket.call(
+        "reaction:sent", {"submissionId": host_submission, "type": "like"}, timeout=5
+    ) == {
+        "ok": False,
+        "error": {"code": "SELF_REACTION", "message": "내 사진에는 누를 수 없어요", "detail": None},
+    }
+
+    ack = await guest_socket.call(
+        "reaction:sent", {"submissionId": host_submission, "type": "like"}, timeout=5
+    )
+    assert ack == {"ok": True}
+    updated = await next_event(host_events, "reaction")
+    assert updated == {
+        "roundId": str(round_id),
+        "submissionId": host_submission,
+        "like": 1,
+        "question": 0,
+    }
+    assert "participantId" not in str(updated)  # RX-09 never says who pressed
+
+    # RX-04: the same command toggles off, and like and question are independent.
+    await guest_socket.call(
+        "reaction:sent", {"submissionId": host_submission, "type": "like"}, timeout=5
+    )
+    assert (await next_event(host_events, "reaction"))["like"] == 0
+    await guest_socket.call(
+        "reaction:sent", {"submissionId": host_submission, "type": "like"}, timeout=5
+    )
+    await next_event(host_events, "reaction")
+    await guest_socket.call(
+        "reaction:sent", {"submissionId": host_submission, "type": "question"}, timeout=5
+    )
+    both = await next_event(host_events, "reaction", lambda data: data["question"] == 1)
+    assert (both["like"], both["question"]) == (1, 1)
+
+    async with runtime.sessions() as session:
+        rows = {
+            row.participant_id: row
+            for row in await session.scalars(
+                select(Submission).where(Submission.round_id == round_id)
+            )
+        }
+        # SC-06·RX-01: reactions never touch the score ledger.
+        assert rows[int(host_id)].rank_points in (100, 70)
+        assert rows[int(host_id)].like_count == 0
+
+    await fire_now(runtime.redis, "round_viewing_end", round_id)
+    closed = await next_event(host_events, "closed_round")
+    assert closed["roundId"] == str(round_id)
+    assert {entry["submissionId"] for entry in closed["reactions"]} == {host_submission}
+    assert closed["reactions"][0] == {"submissionId": host_submission, "like": 1, "question": 1}
+    assert closed["nextRoundAtMs"] > 0
+
+    async with runtime.sessions() as session:
+        row = await session.get(Submission, int(host_submission))
+        assert (row.like_count, row.question_count) == (1, 1)
+        stored = list(await session.scalars(select(Reaction).where(Reaction.round_id == round_id)))
+        assert {reaction.type.value for reaction in stored} == {"like", "question"}
+        assert all(reaction.target_submission_id == int(host_submission) for reaction in stored)
+
+    # RX-10: the closed round refuses further reactions.
+    assert (
+        await guest_socket.call(
+            "reaction:sent", {"submissionId": host_submission, "type": "like"}, timeout=5
+        )
+    )["error"]["code"] == "REACTION_CLOSED"
+
+
+async def test_a_host_skip_ends_the_viewing_stage_immediately(network):
+    http, connect, apps = network
+    runtime = apps[0].state.resources
+    host, _, host_cookie = await http(0)
+    guest, _, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 30})).json()[
+        "slug"
+    ]
+    await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "참가자"})
+    host_socket, host_events = await connect(0, slug, host_cookie)
+    guest_socket, guest_events = await connect(1, slug, guest_cookie)
+    await next_event(host_events, "joined")
+    await next_event(guest_events, "joined")
+    await host.post(f"/api/rooms/{slug}/start")
+    round_id, _, _ = await play_round((host, guest), (host_events, guest_events), slug, runtime)
+
+    # A guest vote alone is not enough while another connected viewer has not voted.
+    assert await guest_socket.call("round:skip", {"roundId": str(round_id)}, timeout=5) == {
+        "ok": True
+    }
+    status = await next_event(guest_events, "skipStatus")
+    assert status == {"roundId": str(round_id), "skipped": 1, "total": 2}
+    async with runtime.sessions() as session:
+        current = await session.get(Round, round_id)
+        assert current.status == RoundStatus.FINALIZED
+
+    # RS-08: the host ends viewing regardless of the denominator.
+    assert await host_socket.call("round:skip", {"roundId": str(round_id)}, timeout=5) == {
+        "ok": True
+    }
+    second = await next_event(guest_events, "revealed", lambda data: data["index"] == 2)
+    assert int(second["roundId"]) != round_id
+
+    async with runtime.sessions() as session:
+        current = await session.get(Round, round_id)
+        assert current.status == RoundStatus.CLOSED
+        votes = list(await session.scalars(select(RoundSkip).where(RoundSkip.round_id == round_id)))
+        assert len(votes) == 2
+
+
+async def test_every_connected_viewer_skipping_closes_the_round(network):
+    http, connect, apps = network
+    runtime = apps[0].state.resources
+    host, _, host_cookie = await http(0)
+    guest, _, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 30})).json()[
+        "slug"
+    ]
+    await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "참가자"})
+    host_socket, host_events = await connect(0, slug, host_cookie)
+    guest_socket, guest_events = await connect(1, slug, guest_cookie)
+    await next_event(host_events, "joined")
+    await next_event(guest_events, "joined")
+    await host.post(f"/api/rooms/{slug}/start")
+    round_id, _, _ = await play_round((host, guest), (host_events, guest_events), slug, runtime)
+
+    await guest_socket.call("round:skip", {"roundId": str(round_id)}, timeout=5)
+    await next_event(guest_events, "skipStatus")
+    # The guest leaves the vote standing; the host completing it reaches the denominator.
+    await host_socket.call("round:skip", {"roundId": str(round_id)}, timeout=5)
+    await next_event(guest_events, "revealed", lambda data: data["index"] == 2)
+
+    async with runtime.sessions() as session:
+        current = await session.get(Round, round_id)
+        assert current.status == RoundStatus.CLOSED
