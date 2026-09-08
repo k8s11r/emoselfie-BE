@@ -1,4 +1,5 @@
 import asyncio
+import secrets
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from http.cookies import SimpleCookie
@@ -14,8 +15,11 @@ from app.core import clock
 from app.core.errors import AppError
 from app.core.ratelimit import enforce_limit
 from app.core.redis import (
+    POD_REFRESH_SEC,
+    POD_TTL_SEC,
     PRESENCE_TTL_SEC,
     SOCKET_TTL_SEC,
+    pod_key,
     room_key,
     round_key,
     socket_key,
@@ -36,7 +40,8 @@ if TYPE_CHECKING:
 CLAIM_SOCKET = """
 local old = redis.call('GET', KEYS[1])
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[5])
-redis.call('HSET', KEYS[2], 'userId', ARGV[2], 'participantId', ARGV[3], 'roomId', ARGV[4])
+redis.call('HSET', KEYS[2], 'userId', ARGV[2], 'participantId', ARGV[3], 'roomId', ARGV[4],
+    'podId', ARGV[6])
 redis.call('EXPIRE', KEYS[2], ARGV[5])
 return old
 """
@@ -79,6 +84,9 @@ class Realtime:
         )
         self.asgi = socketio.ASGIApp(self.server, socketio_path="")
         self.emitter = Emitter(self.server)
+        # Sockets are owned by the Pod that accepted them; this marker says the owner is alive.
+        self.pod_id = secrets.token_hex(8)
+        self.heartbeat: asyncio.Task[None] | None = None
         self.server.on("connect", self.connect)
         self.server.on("disconnect", self.disconnect)
         self.server.on("presence:ping", self.ping)
@@ -118,6 +126,7 @@ class Realtime:
                     str(participant.id),
                     str(room.id),
                     str(SOCKET_TTL_SEC),
+                    self.pod_id,
                 )
                 if old_sid:
                     old_context = await self.runtime.redis.hgetall(socket_key(old_sid.decode()))
@@ -417,7 +426,31 @@ class Realtime:
                     ),
                 )
 
+    async def start_heartbeat(self) -> None:
+        await self.runtime.redis.set(pod_key(self.pod_id), "1", ex=POD_TTL_SEC)
+        if self.heartbeat is None:
+            self.heartbeat = asyncio.create_task(self._beat())
+
+    async def _beat(self) -> None:
+        while True:
+            await asyncio.sleep(POD_REFRESH_SEC)
+            try:
+                await self.runtime.redis.set(pod_key(self.pod_id), "1", ex=POD_TTL_SEC)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A missed beat only shortens this Pod's liveness marker; the next one restores it.
+                pass
+
     async def shutdown(self) -> None:
+        if self.heartbeat is not None:
+            self.heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.heartbeat
+            self.heartbeat = None
+        with suppress(Exception):
+            # A clean exit gives up the marker at once instead of waiting for its TTL.
+            await self.runtime.redis.delete(pod_key(self.pod_id))
         await self.server.shutdown()
         # python-socketio's shutdown only stops Engine.IO, not the Redis listener.
         task = getattr(self.manager, "thread", None)

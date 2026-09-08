@@ -14,6 +14,9 @@ IMAGE_TTL_SEC = 180
 ROOM_LOCK_TTL_MS = 5000
 JOB_LOCK_TTL_MS = 30000
 SCHEDULER_TIMERS = "sched:timers"
+# A Pod refreshes its own liveness so a socket left behind by a crash can be recognised.
+POD_TTL_SEC = 60
+POD_REFRESH_SEC = 20
 
 
 def socket_key(sid: str) -> str:
@@ -52,6 +55,10 @@ def room_lock_key(room_id: int) -> str:
 
 def job_lock_key(job_id: str) -> str:
     return f"sched:lock:{job_id}"
+
+
+def pod_key(pod_id: str) -> str:
+    return f"pod:{pod_id}"
 
 
 def rate_limit_key(scope: str, subject: str) -> str:

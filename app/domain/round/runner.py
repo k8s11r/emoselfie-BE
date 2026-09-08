@@ -12,7 +12,13 @@ from app.core.errors import AppError
 from app.core.redis import IMAGE_TTL_SEC, image_key
 from app.core.security import media_token
 from app.db.models import Participant, Room, Round, Submission
-from app.domain.enums import EmotionLabel, RoomStatus, RoundStatus, SubmissionStatus
+from app.domain.enums import (
+    ConnectionStatus,
+    EmotionLabel,
+    RoomStatus,
+    RoundStatus,
+    SubmissionStatus,
+)
 from app.domain.game.service import active_participants, open_round
 from app.domain.participant import service as participants
 from app.domain.reaction import service as reactions
@@ -55,6 +61,42 @@ class RoundRunner:
         elif job.kind == "participant_left":
             await self.expire_participant(job.target_id)
         # host_delegate and room_expire arrive with BE-051·027.
+
+    async def reconcile_connections(self) -> int:
+        """Downgrade participants whose socket died with its Pod, then start their grace.
+
+        Redis is the shared authority, so a socket held by another Pod is never touched.
+        """
+        async with self.runtime.sessions() as session:
+            candidates = await participants.connected_without_socket(session)
+        stale = [
+            member
+            for member in candidates
+            if not await participants.socket_is_live(self.runtime.redis, member.user_id, member.id)
+        ]
+        reconciled = 0
+        for member in stale:
+            async with self.runtime.sessions.begin() as session:
+                room = await session.get(Room, member.room_id, with_for_update=True)
+                current = await session.get(Participant, member.id)
+                if room is None or current is None:
+                    continue
+                await session.refresh(current)
+                if current.connection_status != ConnectionStatus.CONNECTED:
+                    continue
+                # Re-check under the room lock: a reconnect commits its Redis claim there.
+                if await participants.socket_is_live(
+                    self.runtime.redis, current.user_id, current.id
+                ):
+                    continue
+                current.connection_status = ConnectionStatus.DISCONNECTED
+                current.disconnected_at = clock.now_utc()
+                room_id = room.id
+            await self.hold_slot(member.id)
+            if self.runtime.realtime is not None:
+                await self.runtime.realtime.refresh_lobby(room_id)
+            reconciled += 1
+        return reconciled
 
     async def hold_slot(self, participant_id: int) -> None:
         """D-6: start the grace clock so an entry that never reaches a socket frees its slot."""

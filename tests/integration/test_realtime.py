@@ -19,6 +19,7 @@ from app.core import clock
 from app.core.redis import (
     SCHEDULER_TIMERS,
     job_lock_key,
+    pod_key,
     rate_limit_key,
     room_key,
     round_key,
@@ -1113,3 +1114,71 @@ async def test_a_connected_participant_keeps_its_slot(network):
             if await due_at(runtime.redis, Job("participant_left", guest_id)) is not None:
                 break
             await asyncio.sleep(0.05)
+
+
+async def test_a_socket_left_by_a_dead_pod_returns_its_slot(network):
+    """G-09: a crashed Pod leaves its keys behind, so key existence cannot mean connected."""
+    http, connect, apps = network
+    runtime = apps[0].state.resources
+    host, _, host_cookie = await http(0)
+    guest, guest_identity, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 15})).json()[
+        "slug"
+    ]
+    await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    joined = await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "참가자"})
+    guest_id = int(joined.json()["participantId"])
+    host_socket, host_events = await connect(0, slug, host_cookie)
+    guest_socket, guest_events = await connect(1, slug, guest_cookie)
+    await next_event(guest_events, "joined")
+    await next_event(host_events, "joined", lambda data: len(data["participants"]) == 2)
+
+    # A live socket is left alone, and no grace timer is armed for it.
+    assert await runtime.rounds.reconcile_connections() == 0
+    assert await due_at(runtime.redis, Job("participant_left", guest_id)) is None
+
+    # The guest's Pod dies: its liveness marker disappears while the socket keys survive.
+    pod_id = apps[1].state.resources.realtime.pod_id
+    await runtime.redis.delete(pod_key(pod_id))
+    assert await runtime.redis.get(user_socket_key(str(guest_identity))) is not None
+
+    assert await runtime.rounds.reconcile_connections() == 1
+
+    async with runtime.sessions() as session:
+        member = await session.get(Participant, guest_id)
+        assert member.connection_status == ConnectionStatus.DISCONNECTED
+        assert member.disconnected_at is not None
+    assert await due_at(runtime.redis, Job("participant_left", guest_id)) is not None
+
+    # The grace then returns the seat exactly as a normal disconnect would.
+    async with runtime.sessions.begin() as session:
+        member = await session.get(Participant, guest_id)
+        member.disconnected_at = clock.now_utc() - timedelta(
+            seconds=runtime.settings.participant_grace_sec + 1
+        )
+    await fire_now(runtime.redis, "participant_left", guest_id)
+    released = await next_event(host_events, "joined", lambda data: len(data["participants"]) == 1)
+    assert [member["nickname"] for member in released["participants"]] == ["방장"]
+
+
+async def test_a_live_pod_keeps_refreshing_its_marker(network):
+    """The marker is server owned, so a client that never sends presence pings stays connected."""
+    http, connect, apps = network
+    runtime = apps[0].state.resources
+    host, _, host_cookie = await http(0)
+    guest, _, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 15})).json()[
+        "slug"
+    ]
+    await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "참가자"})
+    await connect(0, slug, host_cookie)
+    guest_socket, guest_events = await connect(1, slug, guest_cookie)
+    await next_event(guest_events, "joined")
+
+    for app in apps:
+        marker = pod_key(app.state.resources.realtime.pod_id)
+        assert await runtime.redis.exists(marker)
+        assert 0 < await runtime.redis.ttl(marker) <= 60
+
+    assert await runtime.rounds.reconcile_connections() == 0

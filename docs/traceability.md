@@ -28,6 +28,7 @@
 | BE-017, PV-01·02, §8.4 | api/media.py, media/images.py, core/security.py | test_security.py, test_realtime.py의 교차 사용·410 | 이미지 캐시·개인 토큰 완료; 만료 갱신은 G-10 |
 | BE-035, RS-01~05·09·12, §13.1 | realtime/server.py, emitter.py, domain/round/runner.py | test_realtime.py의 viewer 전용 전달·늦은 제출자 backlog | 가입·scored·status·backlog·currentRank 완료; 재접속 복원은 BE-039 |
 | BE-043·044·045, RX-01~10·RS-08·15 | domain/reaction/service.py, realtime/server.py, domain/round | test_realtime.py의 리액션·스킵 흐름 | 리액션·스킵·종료 스냅샷 완료; G-07·08 후속 |
+| BE-057 일부, G-09 | realtime/server.py, participant/service.py, core/resources.py | test_realtime.py의 죽은 Pod 소켓 회수 | Pod 마커 기반 연결 재조정 |
 | BE-050 일부, D-6·RO-06 | domain/participant/service.py, round/runner.py, realtime/server.py | test_realtime.py의 미연결 슬롯 반환·연결 시 취소 | 유예·정원 반환 구현; 재접속 복원은 BE-039 |
 | ID-01·02, §6.1·6.2 | api/deps.py, api/middleware.py | test_realtime.py의 쿠키 없는 입장 거절 | 쿠키 없는 세션의 입장 차단 |
 | BE-025, RD-01·02·PM-10, §9 | domain/game/emotions.py, service.py, api/rooms.py | test_emotions.py, test_realtime.py의 2 Pod 시작 흐름 | 시작·시퀀스·1라운드 공개 완료; 마감·채점 후속 |
@@ -44,7 +45,7 @@
 전체 게임의 다중 Pod 복구, 제품 E2E, FE 브라우저 연동, 부하·모바일 베타는 실행하지 않았으며 이 결과로 완료 판정하지 않는다.
 
 2026-09-08 로컬 검증: Python 3.11.16, PostgreSQL 16.13, Redis 7.4.8, torch 2.8.0, mediapipe 0.10.35.
-단위·계약·통합·모델 합계 202개 통과(단위·계약 143, 통합 52, 모델 7). Ruff lint/format, mypy,
+단위·계약·통합·모델 합계 204개 통과(단위·계약 143, 통합 54, 모델 7). Ruff lint/format, mypy,
 `alembic check`, 초기 migration 적용→롤백→재적용 통과. 원격 PR/CI 결과는 아직 없다.
 
 BE-018 로컬 benchmark(Apple M3, 8 CPU, torch 1스레드, INFERENCE_CONCURRENCY=2):

@@ -1,10 +1,16 @@
 """D-6 participant grace. A slot is held only while an entry is still on its way to a socket."""
 
+from collections.abc import Awaitable
 from datetime import timedelta
+from typing import cast
+from uuid import UUID
 
+from redis.asyncio import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import clock
+from app.core.redis import pod_key, socket_key, user_socket_key
 from app.db.models import Participant, Room
 from app.domain.enums import ConnectionStatus, ParticipantStatus, RoomStatus
 
@@ -41,3 +47,40 @@ async def active_shortfall(session: AsyncSession, room: Room) -> bool:
     from app.domain.game.service import MIN_PLAYERS, active_count
 
     return await active_count(session, room.id) < MIN_PLAYERS
+
+
+async def socket_is_live(client: Redis, user_id: UUID, participant_id: int) -> bool:
+    """A socket counts as live only while the Pod that accepted it still says it is running.
+
+    A crashed Pod leaves `user:sock` and `sock` keys behind until their TTL, so key existence
+    alone would keep a seat occupied by a connection nobody holds any more (G-09).
+    """
+    sid = await cast(Awaitable[bytes | None], client.get(user_socket_key(str(user_id))))
+    if not sid:
+        return False
+    context = await cast(Awaitable[dict[bytes, bytes]], client.hgetall(socket_key(sid.decode())))
+    if not context or context.get(b"participantId") != str(participant_id).encode():
+        return False
+    owner = context.get(b"podId")
+    if owner is None:
+        # Every connection this code accepts records its Pod, so a record without one was
+        # written by a process that is no longer running. Its socket cannot still be held.
+        return False
+    return bool(await cast(Awaitable[int], client.exists(pod_key(owner.decode()))))
+
+
+async def connected_without_socket(session: AsyncSession) -> list[Participant]:
+    """Participants an open room still counts as connected, for a liveness re-check."""
+    return list(
+        await session.scalars(
+            select(Participant)
+            .join(Room, Room.id == Participant.room_id)
+            .where(
+                Room.status.in_((RoomStatus.WAITING, RoomStatus.PLAYING)),
+                Participant.status.in_(
+                    (ParticipantStatus.ACTIVE, ParticipantStatus.WAITING_NEXT_GAME)
+                ),
+                Participant.connection_status == ConnectionStatus.CONNECTED,
+            )
+        )
+    )
