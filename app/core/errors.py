@@ -15,6 +15,9 @@ ERRORS = {
     "ROOM_FULL": ErrorDefinition(409, "방이 가득 찼어요"),
     "NOT_HOST": ErrorDefinition(403, "방장만 할 수 있어요"),
     "NOT_A_PARTICIPANT": ErrorDefinition(403, "먼저 입장해 주세요"),
+    "SESSION_REQUIRED": ErrorDefinition(
+        403, "브라우저가 참여 정보를 저장하지 못했어요. 쿠키를 허용하고 다시 시도해 주세요"
+    ),
     "NOT_ENOUGH_PLAYERS": ErrorDefinition(409, "2명 이상이어야 시작할 수 있어요"),
     "GAME_ALREADY_STARTED": ErrorDefinition(409, "게임이 이미 시작됐어요"),
     "INVALID_SETTINGS_COMBINATION": ErrorDefinition(

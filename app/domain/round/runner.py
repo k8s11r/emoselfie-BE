@@ -14,6 +14,7 @@ from app.core.security import media_token
 from app.db.models import Participant, Room, Round, Submission
 from app.domain.enums import EmotionLabel, RoomStatus, RoundStatus, SubmissionStatus
 from app.domain.game.service import active_participants, open_round
+from app.domain.participant import service as participants
 from app.domain.reaction import service as reactions
 from app.domain.round import service
 from app.domain.scheduler.service import Job, cancel, schedule
@@ -51,7 +52,50 @@ class RoundRunner:
             await self.force_finalize(job.target_id)
         elif job.kind == "round_viewing_end":
             await self.advance(job.target_id)
-        # participant_left, host_delegate and room_expire arrive with BE-050·051·027.
+        elif job.kind == "participant_left":
+            await self.expire_participant(job.target_id)
+        # host_delegate and room_expire arrive with BE-051·027.
+
+    async def hold_slot(self, participant_id: int) -> None:
+        """D-6: start the grace clock so an entry that never reaches a socket frees its slot."""
+        await schedule(
+            self.runtime.redis,
+            Job("participant_left", participant_id),
+            clock.now_ms() + self.runtime.settings.participant_grace_sec * 1000,
+        )
+
+    async def keep_slot(self, participant_id: int) -> None:
+        await cancel(self.runtime.redis, Job("participant_left", participant_id))
+
+    async def expire_participant(self, participant_id: int) -> None:
+        """The grace ran out with no socket, so the slot returns to the room (D-6, RO-06)."""
+        removed = False
+        finished: dict[str, Any] | None = None
+        async with self.runtime.sessions.begin() as session:
+            member = await session.get(Participant, participant_id)
+            if member is None:
+                return
+            room = await session.get(Room, member.room_id, with_for_update=True)
+            if room is None or room.status in (RoomStatus.CLOSED, RoomStatus.FINISHED):
+                return
+            await session.refresh(member)
+            if not participants.grace_expired(member, self.runtime.settings.participant_grace_sec):
+                return
+            removed = participants.release(room, member)
+            room_id = room.id
+            if removed and await participants.active_shortfall(session, room):
+                finished = await service.finish_game(session, room, "not_enough_players")
+        if not removed:
+            return
+        await self._send_room(
+            "participant:removed",
+            room_id,
+            {"participantId": str(participant_id), "reason": "timeout"},
+        )
+        if finished is not None:
+            await self._send_room("game:finished", room_id, finished)
+        elif self.runtime.realtime is not None:
+            await self.runtime.realtime.refresh_lobby(room_id)
 
     async def schedule_deadline(self, current: Round) -> None:
         await schedule(

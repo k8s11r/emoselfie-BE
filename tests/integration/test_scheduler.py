@@ -77,7 +77,8 @@ async def test_future_jobs_wait_and_cancellation_removes_them(redis):
 
     assert await cancel(client, later) is True
     assert await cancel(client, later) is False
-    assert await claim_due(client, fire_at + 1) == []
+    # Other suites share this queue, so only this test's own members are asserted on.
+    assert [job for job in await claim_due(client, fire_at + 1) if job in jobs] == []
 
 
 async def test_rescheduling_moves_a_single_member(redis):
@@ -87,8 +88,10 @@ async def test_rescheduling_moves_a_single_member(redis):
     await schedule(client, expire, clock.now_ms() + 90_000)
 
     assert await client.zcount(SCHEDULER_TIMERS, "-inf", "+inf") >= 1
-    assert await claim_due(client, clock.now_ms() + 60_000) == []
-    assert await claim_due(client, clock.now_ms() + 120_000) == [expire]
+    early = await claim_due(client, clock.now_ms() + 60_000, limit=100)
+    assert [job for job in early if job in jobs] == []
+    later = await claim_due(client, clock.now_ms() + 120_000, limit=100)
+    assert [job for job in later if job in jobs] == [expire]
 
 
 async def test_claim_batch_is_bounded(redis):
@@ -98,10 +101,10 @@ async def test_claim_batch_is_bounded(redis):
         await schedule(client, job, past)
 
     first = await claim_due(client, clock.now_ms(), limit=2)
-    rest = await claim_due(client, clock.now_ms())
+    rest = [job for job in await claim_due(client, clock.now_ms(), limit=100) if job in jobs]
 
     assert len(first) == 2
-    assert len(first) + len(rest) == len(jobs)
+    assert len([job for job in first if job in jobs]) + len(rest) == len(jobs)
     assert set(first).isdisjoint(rest)
 
 

@@ -10,7 +10,12 @@ PersonalEvent = Literal[
     "round:missed",
     "round:missedUpdate",
 ]
-RoomEvent = Literal["game:started", "round:voided", "game:finished"]
+RoomEvent = Literal[
+    "game:started",
+    "round:voided",
+    "game:finished",
+    "participant:removed",
+]
 ViewerEvent = Literal[
     "round:finalized",
     "round:closed",
@@ -29,7 +34,7 @@ PERSONAL_EVENTS = frozenset(
         "round:missedUpdate",
     )
 )
-ROOM_EVENTS = frozenset(("game:started", "round:voided", "game:finished"))
+ROOM_EVENTS = frozenset(("game:started", "round:voided", "game:finished", "participant:removed"))
 VIEWER_EVENTS = frozenset(
     (
         "round:finalized",

@@ -3,6 +3,7 @@ from uuid import UUID
 
 from fastapi import Depends, Request
 
+from app.core.errors import AppError
 from app.core.ratelimit import enforce_limit
 from app.core.resources import Resources
 from app.db.models import User
@@ -23,6 +24,18 @@ async def current_user(request: Request, runtime: Runtime) -> User:
 
 
 CurrentUser = Annotated[User, Depends(current_user)]
+
+
+async def returning_user(request: Request, runtime: Runtime) -> User:
+    """§6.2 needs the signed cookie for the socket handshake, so a session that did not keep
+    the cookie can never connect, restore or play. Admitting it would only strand a slot."""
+    if not request.state.authenticated:
+        raise AppError("SESSION_REQUIRED")
+    async with runtime.sessions.begin() as session:
+        return await ensure_user(session, request.state.user_id)
+
+
+ReturningUser = Annotated[User, Depends(returning_user)]
 
 
 def session_identity(request: Request) -> UUID:

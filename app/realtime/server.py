@@ -87,6 +87,7 @@ class Realtime:
 
     async def connect(self, sid: str, environ: dict[str, Any], auth: Any = None) -> bool:
         old_room_id: int | None = None
+        old_participant_id = 0
         try:
             cookies = SimpleCookie()
             cookies.load(environ.get("HTTP_COOKIE", ""))
@@ -122,6 +123,7 @@ class Realtime:
                     old_context = await self.runtime.redis.hgetall(socket_key(old_sid.decode()))
                     if old_context and int(old_context[b"participantId"]) != participant.id:
                         old_room_id = int(old_context[b"roomId"])
+                        old_participant_id = int(old_context[b"participantId"])
                         await session.execute(
                             update(Participant)
                             .where(Participant.id == int(old_context[b"participantId"]))
@@ -132,6 +134,7 @@ class Realtime:
                         )
                 participant.connection_status = ConnectionStatus.CONNECTED
                 participant.disconnected_at = None
+                participant_id = participant.id
                 room.last_active_at = clock.now_utc()
                 await self.server.enter_room(sid, f"r:{room.id}")
                 await self.server.enter_room(sid, f"r:{room.id}:players")
@@ -140,7 +143,10 @@ class Realtime:
                 old = old_sid.decode()
                 await self.emitter.personal("session:superseded", old, {})
                 await self.server.disconnect(old)
+            # The socket arrived inside the grace window, so the slot is no longer at risk.
+            await self.runtime.rounds.keep_slot(participant_id)
             if old_room_id is not None:
+                await self.runtime.rounds.hold_slot(old_participant_id)
                 await self.refresh_lobby(old_room_id)
             await self.refresh_lobby(room_id)
             return True
@@ -180,6 +186,8 @@ class Realtime:
                 )
                 await self.runtime.redis.hdel(room_key(room_id, "presence"), str(participant_id))
         if current:
+            # D-6: sixty seconds without a socket and the slot goes back to the room.
+            await self.runtime.rounds.hold_slot(participant_id)
             await self.refresh_lobby(room_id)
 
     async def ping(self, sid: str, data: Any = None) -> dict[str, Any]:

@@ -3,6 +3,7 @@ import ipaddress
 import json
 import socket
 from contextlib import AsyncExitStack
+from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO
 from uuid import uuid4
@@ -31,7 +32,14 @@ from app.core.security import (
     verify_capture_token,
 )
 from app.db.models import Participant, Reaction, Room, Round, RoundSkip, Submission, User
-from app.domain.enums import ConnectionStatus, RoomStatus, RoundStatus, SubmissionStatus
+from app.domain.enums import (
+    ConnectionStatus,
+    ParticipantStatus,
+    RoomStatus,
+    RoundStatus,
+    SubmissionStatus,
+)
+from app.domain.room import service as room_service
 from app.domain.scheduler.service import Job, due_at, schedule
 from app.main import create_app
 
@@ -155,8 +163,20 @@ async def network(settings):
                             select(Round.id).where(Round.room_id.in_([room.id for room in rooms]))
                         )
                     )
+                    participant_ids = list(
+                        await session.scalars(
+                            select(Participant.id).where(
+                                Participant.room_id.in_([room.id for room in rooms])
+                            )
+                        )
+                    )
                     await session.execute(delete(Room).where(Room.host_user_id.in_(users)))
                     await session.execute(delete(User).where(User.uuid.in_(users)))
+                if participant_ids:
+                    await redis.zrem(
+                        SCHEDULER_TIMERS,
+                        *[Job("participant_left", value).member for value in participant_ids],
+                    )
                 for round_id in round_ids:
                     await redis.zrem(
                         SCHEDULER_TIMERS,
@@ -179,6 +199,10 @@ async def network(settings):
                     job_lock_key(Job(kind, round_id).lock_id)
                     for round_id in round_ids
                     for kind in ("round_deadline", "round_scoring_guard", "round_viewing_end")
+                ]
+                keys += [
+                    job_lock_key(Job("participant_left", value).lock_id)
+                    for value in participant_ids
                 ]
                 keys += [socket_key(sid) for sid in sid_values]
                 keys += [rate_limit_key("socket", private_rate_subject(sid)) for sid in sid_values]
@@ -999,3 +1023,93 @@ async def test_a_non_submitter_receives_no_backlog(network):
 
     delivered = [event for event, _ in list(guest_events._queue)]
     assert "scored" not in delivered and "finalized" not in delivered
+
+
+async def test_a_cookieless_client_cannot_take_a_slot(network):
+    """A session that never kept its cookie can never connect (§6.2), so it is refused."""
+    http, _, _ = network
+    host, _, _ = await http(0)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 15})).json()[
+        "slug"
+    ]
+
+    async with AsyncClient(base_url=str(host.base_url)) as stranger:
+        refused = await stranger.post(
+            f"/api/rooms/{slug}/participants", json={"nickname": "쿠키없음"}
+        )
+
+    assert refused.status_code == 403
+    assert refused.json()["error"]["code"] == "SESSION_REQUIRED"
+
+    # Repeating it cannot fill the room either: no participant was ever created.
+    preview = await host.get(f"/api/rooms/{slug}")
+    assert preview.json()["isFull"] is False
+
+
+async def test_an_entry_that_never_connects_returns_its_slot(network):
+    """D-6: a retry storm from a broken client must not hold seats it can never use."""
+    http, connect, apps = network
+    runtime = apps[0].state.resources
+    host, _, host_cookie = await http(0)
+    stranded, _, _ = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 15})).json()[
+        "slug"
+    ]
+    await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    host_socket, host_events = await connect(0, slug, host_cookie)
+    await next_event(host_events, "joined")
+
+    joined = await stranded.post(f"/api/rooms/{slug}/participants", json={"nickname": "미연결"})
+    stranded_id = int(joined.json()["participantId"])
+    await next_event(host_events, "joined", lambda data: len(data["participants"]) == 2)
+
+    # The grace timer is armed at entry, not only at disconnect.
+    assert await due_at(runtime.redis, Job("participant_left", stranded_id)) is not None
+    async with runtime.sessions.begin() as session:
+        member = await session.get(Participant, stranded_id)
+        assert member.connection_status == ConnectionStatus.DISCONNECTED
+        member.disconnected_at = clock.now_utc() - timedelta(
+            seconds=runtime.settings.participant_grace_sec + 1
+        )
+    await fire_now(runtime.redis, "participant_left", stranded_id)
+
+    released = await next_event(host_events, "joined", lambda data: len(data["participants"]) == 1)
+    assert [member["nickname"] for member in released["participants"]] == ["방장"]
+
+    async with runtime.sessions() as session:
+        member = await session.get(Participant, stranded_id)
+        assert member.status == ParticipantStatus.LEFT
+        room = await session.scalar(select(Room).where(Room.invite_slug == slug))
+        assert await room_service.occupied_count(session, room.id) == 1
+
+    # The freed seat is immediately usable by somebody else.
+    newcomer, _, newcomer_cookie = await http(0)
+    admitted = await newcomer.post(f"/api/rooms/{slug}/participants", json={"nickname": "새사람"})
+    assert admitted.status_code == 201
+
+
+async def test_a_connected_participant_keeps_its_slot(network):
+    """The socket arrives inside the grace window, so the timer must be cancelled."""
+    http, connect, apps = network
+    runtime = apps[0].state.resources
+    host, _, host_cookie = await http(0)
+    guest, _, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 15})).json()[
+        "slug"
+    ]
+    await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    joined = await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "참가자"})
+    guest_id = int(joined.json()["participantId"])
+    await connect(0, slug, host_cookie)
+    guest_socket, guest_events = await connect(1, slug, guest_cookie)
+    await next_event(guest_events, "joined")
+
+    assert await due_at(runtime.redis, Job("participant_left", guest_id)) is None
+
+    # Dropping the socket re-arms it, and the participant is released when it fires.
+    await guest_socket.disconnect()
+    async with asyncio.timeout(5):
+        while True:
+            if await due_at(runtime.redis, Job("participant_left", guest_id)) is not None:
+                break
+            await asyncio.sleep(0.05)

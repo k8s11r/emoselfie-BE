@@ -112,6 +112,7 @@ async def join_room(session: AsyncSession, room: Room, user_id: UUID, nickname: 
             color_tag=color,
             status=status,
             connection_status=ConnectionStatus.DISCONNECTED,
+            disconnected_at=clock.now_utc(),
             joined_at=clock.now_utc(),
         )
         session.add(participant)
@@ -120,7 +121,8 @@ async def join_room(session: AsyncSession, room: Room, user_id: UUID, nickname: 
         participant.color_tag = color
         participant.status = status
         participant.connection_status = ConnectionStatus.DISCONNECTED
-        participant.disconnected_at = None
+        # An entry without a socket is a disconnection in progress, not a live participant.
+        participant.disconnected_at = clock.now_utc()
     room.last_active_at = clock.now_utc()
     await session.flush()
     return participant

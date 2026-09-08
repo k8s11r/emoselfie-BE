@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Request, Response
 
-from app.api.deps import CurrentUser, Runtime, limit_ip
+from app.api.deps import CurrentUser, ReturningUser, Runtime, limit_ip
 from app.api.schemas import (
     CreatedRoom,
     LobbyState,
@@ -74,7 +74,7 @@ async def preview(slug: str, request: Request, user: CurrentUser, runtime: Runti
 
 @router.post("/{slug}/participants", status_code=201)
 async def join(
-    slug: str, body: NicknameInput, request: Request, user: CurrentUser, runtime: Runtime
+    slug: str, body: NicknameInput, request: Request, user: ReturningUser, runtime: Runtime
 ) -> ParticipantJoined:
     await limit_ip(request, "room:join:ip", 20, 60)
     async with runtime.sessions.begin() as session:
@@ -87,7 +87,9 @@ async def join(
             status=participant.status,
             is_host=room.host_user_id == user.uuid,
         )
-        room_id = room.id
+        room_id, participant_id = room.id, participant.id
+    # D-6: the slot is held only while the entry is still on its way to a socket.
+    await runtime.rounds.hold_slot(participant_id)
     if runtime.realtime is not None:
         await runtime.realtime.refresh_lobby(room_id)
     return result

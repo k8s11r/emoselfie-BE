@@ -51,7 +51,7 @@ PostgreSQL은 `127.0.0.1:55432`, 조율 Redis는 `56379`, 이미지 Redis는 `56
 | `GET/PATCH /api/me` | 쿠키 발급·복원, 닉네임 저장, 활성 소유 방 조회 |
 | `POST /api/rooms` | 신규 201, 기존 활성 방 200; UNIQUE 기반 경합 방어 |
 | `GET /api/rooms/{slug}` | 입장 전 상태·정원·설정 요약 |
-| `POST /api/rooms/{slug}/participants` | 멱등 입장, 12명 정원, 색상 배정 |
+| `POST /api/rooms/{slug}/participants` | 멱등 입장, 12명 정원, 색상 배정. 서명 쿠키가 있는 세션만 |
 | `PATCH /api/rooms/{slug}/settings` | 대기 중 방장만 변경 |
 | `GET /api/rooms/{slug}/state` | 현재 참여자만 대기실 snapshot 조회 |
 | `POST /api/rooms/{slug}/start` | 방장만, active 2명 이상일 때 게임 시작 |
@@ -65,6 +65,8 @@ PostgreSQL은 `127.0.0.1:55432`, 조율 Redis는 `56379`, 이미지 Redis는 `56
 라운드는 분산 스케줄러가 진행합니다. Pod마다 250ms 주기로 Redis ZSet을 폴링하고 ZREM 반환값으로 소유권을 정하므로 타이머는 여러 Pod에서도 한 번만 발화합니다. 마감 → 미제출 확정 → 채점 확정 → 감상 → 다음 라운드 → 최종 순위까지 서버가 스스로 넘어가며, 무효 라운드와 중단 종료도 처리합니다.
 
 사진 업로드는 `POST /api/rooms/{slug}/rounds/{roundId}/submissions`입니다. 헤더 수신 시각으로 마감을 판정하고 촬영 토큰을 1회만 인정한 뒤 202를 반환하며, 추론은 백그라운드에서 돌아 `submission:scored`로 전달됩니다. 결과 사진은 이미지 Redis에 180초 TTL로 두고 열람자별 서명 토큰이 붙은 `GET /media/{token}`으로만 열립니다. 제출하지 않은 참여자에게는 어떤 결과 이벤트도 발행되지 않습니다. 늦게 제출해 결과 화면에 늦게 합류한 참여자에게는 이미 채점된 결과를 도착 순서대로 다시 보냅니다.
+
+입장한 참여자가 60초 안에 소켓을 열지 않으면 슬롯을 반환합니다. 쿠키를 저장하지 못하는 브라우저는 소켓 인증을 통과할 수 없으므로 입장 자체를 `SESSION_REQUIRED`로 거절합니다. 두 장치가 없으면 한 사용자의 반복 입장이 방 정원을 채워 다른 사람이 `ROOM_FULL`을 받게 됩니다.
 
 감상 단계에서는 `reaction:sent`로 like/question을 독립 토글하고 `round:skip`으로 다음 라운드를 앞당깁니다. 방장 스킵은 즉시, 그 외에는 연결된 열람자 전원이 눌러야 종료되며 리액션은 라운드가 닫힐 때 DB로 확정됩니다. 게임 중 snapshot·재접속은 여전히 503이며 임시 방장, 60초 이탈, 방 만료는 후속 구현입니다.
 
@@ -88,7 +90,7 @@ MODEL_DIR=.models uv run pytest --run-model
 
 기본 pytest는 외부 서비스 없이 단위·계약 테스트를 실행하고 integration과 model은 명시적으로 건너뜁니다. `--run-model`은 실제 weight를 불러 저자 데모 이미지의 판정과 전처리 일치를 대조하므로 아티팩트가 없으면 실패합니다. 통합 테스트는 고유한 테스트 사용자·방·Redis 키만 생성하고 정리하며 전체 DB/Redis를 비우지 않습니다. DB·Redis는 고정된 로컬 개발 포트를 사용하고, 소켓 테스트는 임의의 빈 포트에 실제 Uvicorn 서버 2개를 실행한 뒤 정리합니다.
 
-2026-09-08 기준 전체 199개 테스트(단위·계약 143, 통합 49, 모델 7), Ruff lint/format, mypy, migration 적용·롤백·재적용이 통과했습니다. 실제 FE 브라우저·모바일·게임 완주 검증과 원격 CI는 아직 실행하지 않았습니다.
+2026-09-08 기준 전체 202개 테스트(단위·계약 143, 통합 52, 모델 7), Ruff lint/format, mypy, migration 적용·롤백·재적용이 통과했습니다. 실제 FE 브라우저·모바일·게임 완주 검증과 원격 CI는 아직 실행하지 않았습니다.
 
 로컬 benchmark(Apple M3, torch 1스레드, 동시성 2)에서 모델 로드는 1.41초, 단일 추론 p50은 24~30ms, 1440×1920 12장 동시 제출은 254ms였고 프로세스 RSS는 약 460MB였습니다. HTTP 업로드를 포함한 종단 측정은 아직 아닙니다. 자세한 수치는 [추적표](./docs/traceability.md)에 있습니다.
 
