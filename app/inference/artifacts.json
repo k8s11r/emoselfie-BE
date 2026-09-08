@@ -1,0 +1,17 @@
+{
+  "FER_static_ResNet50_AffectNet.pt": {
+    "url": "https://huggingface.co/ElenaRyumina/face_emotion_recognition/resolve/586bafda3d5ca1427d62b9447f1bea70171663e1/FER_static_ResNet50_AffectNet.pt",
+    "sha256": "8274190b5be4355bd2f07b59f593fcdb294f9d7c563bfa9ac9e5ea06c10692d2",
+    "bytes": 98562934
+  },
+  "blaze_face_short_range.tflite": {
+    "url": "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite",
+    "sha256": "b4578f35940bf5a1a655214a1cce5cab13eba73c1297cd78e1a04c2380b0152f",
+    "bytes": 229746
+  },
+  "fig1.jpg": {
+    "url": "https://huggingface.co/spaces/ElenaRyumina/Facial_Expression_Recognition/resolve/c5eb0fc9982eee9e86aec5f6c1d785ea187ff5e1/images/fig1.jpg",
+    "sha256": "d1817b99315c1a0b52614b3c252315a8a2dc3ba44da50eff086d92abcaa7b398",
+    "bytes": 43032
+  }
+}

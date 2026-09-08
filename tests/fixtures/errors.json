@@ -1,0 +1,10 @@
+{
+  "http": {
+    "error": {"code": "ROOM_FULL", "message": "방이 가득 찼어요", "detail": {"capacity": 12}}
+  },
+  "socket": {
+    "ok": false,
+    "error": {"code": "NOT_A_VIEWER", "message": "이번 라운드 결과는 볼 수 없어요", "detail": null}
+  },
+  "socketSuccess": {"ok": true}
+}
