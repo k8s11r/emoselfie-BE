@@ -18,6 +18,7 @@
 | BE-013, §12.3 | inference/runner.py | test_runner.py | 완료; 업로드 API 연결은 BE-014·016 |
 | BE-015 일부, §8.3 | media/images.py | test_images.py | 부분 완료; multipart 스트림·body 중단은 미구현 |
 | BE-018, §21-D | inference/runner.py, pipeline.py | 로컬 benchmark 측정 기록 | 엔진 구간만 측정; 종단 측정 미실시 |
+| BE-040, SC-01~05·09, §11·18.1 | domain/scoring/service.py | test_scoring.py | 순수 함수 완료; G-11 합의와 BE-041·042 반영 후속 |
 | BE-020, ID-01~06·08 | core/security.py, api/middleware.py, api/session.py | test_security.py, test_room_api.py | 세션 완료 |
 | BE-021, RO-01~03 | domain/room/service.py, api/rooms.py | 동시 4회 생성/슬롯 반환 테스트 | 완료 |
 | BE-022~024, PM-07·RO-05·06·17 | domain/room, api/rooms.py | 비참여자 차단·14명 경합·재입장·방장 설정 | REST 구현; G-05·06·임시 방장 후속 |
@@ -32,7 +33,7 @@
 전체 게임의 다중 Pod 복구, 제품 E2E, FE 브라우저 연동, 부하·모바일 베타는 실행하지 않았으며 이 결과로 완료 판정하지 않는다.
 
 2026-09-08 로컬 검증: Python 3.11.16, PostgreSQL 16.13, Redis 7.4.8, torch 2.8.0, mediapipe 0.10.35.
-단위·계약·통합·모델 합계 98개 통과(단위·계약 65, 통합 26, 모델 7). Ruff lint/format, mypy,
+단위·계약·통합·모델 합계 131개 통과(단위·계약 98, 통합 26, 모델 7). Ruff lint/format, mypy,
 `alembic check`, 초기 migration 적용→롤백→재적용 통과. 원격 PR/CI 결과는 아직 없다.
 
 BE-018 로컬 benchmark(Apple M3, 8 CPU, torch 1스레드, INFERENCE_CONCURRENCY=2):

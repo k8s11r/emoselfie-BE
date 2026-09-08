@@ -110,7 +110,8 @@
 
 선행: G-07·08·11, 결과 통합은 BE-030~039 및 M1 엔진 필요.
 
-- [ ] `BE-040` (P0/M) targetScore 1자리·라운드 정렬·100/70/50/30·no_face 30·failed 보정·missed 0 순수 함수와 §18.1 테이블 테스트 구현 — SC-01~05·09, G-11
+- [x] `BE-040` (P0/M) targetScore 1자리·라운드 정렬·100/70/50/30·no_face 30·failed 보정·missed 0 순수 함수와 §18.1 테이블 테스트 구현 — SC-01~05·09, G-11
+  - 2026-09-08: `domain/scoring`에 라운드 채점·누적·최종 순위·mostLoved를 I/O 없는 순수 함수로 구현하고 §18.1 표 10개 케이스를 모두 덮었다. 반올림 half-up, failed 평균 모집단, 0점과 no_face 정렬, 완전 동점 키는 docs/contracts.md에 BE 기준으로 기록했으며 G-11 합의로 바뀔 수 있다. DB 반영과 이벤트 발행은 BE-041·042다.
 - [ ] `BE-041` (P0/L) finalized 트랜잭션에 제출·포인트·best_round_score·라운드 상태 반영, 재실행 시 중복 누적 방지 및 커밋 후 이벤트 복구 — D-8, G-08·09
 - [ ] `BE-042` (P0/M) 최종 순위(-totalPoints,-bestRoundScore,joinedAt)·mostLoved/동수/null, 중단 reason 및 전원 game:finished 구현 — §11.4, SC-06, RX-11, FN-01~03
 - [ ] `BE-043` (P0/L) 리액션 수신 권한·채점 확정·자기 사진 금지·like/question 독립 토글·원자적 카운트·중복 명령 방어 구현 — §13.2, RX-01~09, G-02
