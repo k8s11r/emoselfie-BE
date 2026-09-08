@@ -11,9 +11,14 @@ from httpx import AsyncClient
 from sqlalchemy import delete, select
 
 from app.core.redis import rate_limit_key, room_key, socket_key, user_socket_key
-from app.core.security import COOKIE_NAME, private_rate_subject, sign_cookie
-from app.db.models import Participant, Room, User
-from app.domain.enums import ConnectionStatus
+from app.core.security import (
+    COOKIE_NAME,
+    private_rate_subject,
+    sign_cookie,
+    verify_capture_token,
+)
+from app.db.models import Participant, Room, Round, User
+from app.domain.enums import ConnectionStatus, RoomStatus, RoundStatus
 from app.main import create_app
 
 pytestmark = pytest.mark.integration
@@ -78,6 +83,8 @@ async def network(settings):
                 client.on("room:joined", lambda data: queue.put_nowait(("joined", data)))
                 client.on("room:closed", lambda data: queue.put_nowait(("closed", data)))
                 client.on("session:superseded", lambda data: queue.put_nowait(("superseded", data)))
+                client.on("game:started", lambda data: queue.put_nowait(("started", data)))
+                client.on("round:revealed", lambda data: queue.put_nowait(("revealed", data)))
                 await client.connect(
                     f"http://127.0.0.1:{ports[pod]}?slug={slug}",
                     headers={"Cookie": f"{COOKIE_NAME}={cookie}"},
@@ -199,3 +206,100 @@ async def test_socket_requires_signed_cookie_and_current_participant(network):
             await connect(1, slug, token)
     # Even the owner cannot subscribe before participant admission.
     assert (await outsider.get(f"/api/rooms/{slug}/state")).status_code == 403
+
+
+async def test_game_start_broadcasts_once_and_reveals_a_personal_capture_token(network, settings):
+    http, connect, apps = network
+    host, host_id, host_cookie = await http(0)
+    guest, guest_id, guest_cookie = await http(1)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 15})).json()[
+        "slug"
+    ]
+    await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    host_socket, host_events = await connect(0, slug, host_cookie)
+    await next_event(host_events, "joined")
+
+    # A lone host cannot start; PM-10 needs two active players.
+    lonely = await host.post(f"/api/rooms/{slug}/start")
+    assert lonely.status_code == 409 and lonely.json()["error"]["code"] == "NOT_ENOUGH_PLAYERS"
+
+    joined = await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "참가자"})
+    guest_participant = joined.json()["participantId"]
+    guest_socket, guest_events = await connect(1, slug, guest_cookie)
+    await next_event(guest_events, "joined")
+
+    assert (await host.post(f"/api/rooms/{slug}/start")).status_code == 200
+
+    started = await next_event(guest_events, "started")
+    assert started["roundCount"] == 3 and started["timeLimitSec"] == 15
+    assert guest_participant in started["participantIds"] and len(started["participantIds"]) == 2
+    assert await next_event(host_events, "started") == started
+
+    mine = await next_event(host_events, "revealed")
+    theirs = await next_event(guest_events, "revealed")
+    assert mine["roundId"] == theirs["roundId"] and mine["index"] == 1
+    assert mine["activeCount"] == 2 and mine["roundCount"] == 3
+    assert set(mine["emotion"]) == {"label", "displayName", "emoji", "color", "hint"}
+    # §6.3: the capture token is personal, so the room broadcast never carries one.
+    assert mine["captureToken"] != theirs["captureToken"]
+    assert "captureToken" not in str(started)
+    assert str(host_id) not in str(mine) and str(guest_id) not in str(theirs)
+
+    # RD-03·08: absolute times only, three seconds of countdown then the configured limit.
+    assert theirs["deadlineAtMs"] - theirs["countdownEndsAtMs"] == 15_000
+    assert verify_capture_token(
+        theirs["captureToken"],
+        int(theirs["roundId"]),
+        int(guest_participant),
+        theirs["deadlineAtMs"],
+        settings.capture_token_secret.get_secret_value(),
+    )
+
+    # A second start finds the room already playing, and settings freeze with it.
+    repeated = await host.post(f"/api/rooms/{slug}/start")
+    assert (
+        repeated.status_code == 409 and repeated.json()["error"]["code"] == "GAME_ALREADY_STARTED"
+    )
+    frozen = await host.patch(f"/api/rooms/{slug}/settings", json={"roundCount": 7})
+    assert frozen.status_code == 409
+
+    async with apps[0].state.resources.sessions() as session:
+        room = await session.scalar(select(Room).where(Room.invite_slug == slug))
+        assert room.status == RoomStatus.PLAYING
+        assert len(room.emotion_sequence) == 3 and len(set(room.emotion_sequence)) == 3
+        current = await session.get(Round, room.current_round_id)
+        assert current.index == 1 and current.status == RoundStatus.REVEALED
+        assert current.target_emotion == room.emotion_sequence[0]
+
+
+async def test_only_the_host_starts_and_a_waiting_joiner_waits_for_the_next_game(network):
+    http, connect, apps = network
+    host, _, host_cookie = await http(0)
+    guest, _, guest_cookie = await http(1)
+    latecomer, _, latecomer_cookie = await http(0)
+    slug = (await host.post("/api/rooms", json={"roundCount": 3, "timeLimitSec": 15})).json()[
+        "slug"
+    ]
+    await host.post(f"/api/rooms/{slug}/participants", json={"nickname": "방장"})
+    await guest.post(f"/api/rooms/{slug}/participants", json={"nickname": "참가자"})
+
+    refused = await guest.post(f"/api/rooms/{slug}/start")
+    assert refused.status_code == 403 and refused.json()["error"]["code"] == "NOT_HOST"
+    assert (await host.post(f"/api/rooms/{slug}/start")).status_code == 200
+
+    # RO-09: joining a playing room waits for the next game and never receives a capture token.
+    late = await latecomer.post(f"/api/rooms/{slug}/participants", json={"nickname": "늦은사람"})
+    assert late.json()["status"] == "waiting_next_game"
+    with pytest.raises(socketio.exceptions.ConnectionError):
+        await connect(0, slug, latecomer_cookie)
+
+    async with apps[0].state.resources.sessions() as session:
+        room = await session.scalar(select(Room).where(Room.invite_slug == slug))
+        players = list(
+            await session.scalars(select(Participant).where(Participant.room_id == room.id))
+        )
+    assert sorted(player.status.value for player in players) == [
+        "active",
+        "active",
+        "waiting_next_game",
+    ]

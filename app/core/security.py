@@ -37,3 +37,20 @@ def verify_cookie(value: str | None, settings: Settings) -> tuple[UUID, bool] | 
 def private_rate_subject(subject: str) -> str:
     # Internal Redis keys need a stable opaque subject, never a raw IP or UUID.
     return hashlib.sha256(subject.encode()).hexdigest()
+
+
+def capture_token(round_id: int, participant_id: int, deadline_at_ms: int, secret: str) -> str:
+    """CP-03 §6.3. Proves a capture session was issued, never that the pixels came from it."""
+    payload = f"{round_id}:{participant_id}:{deadline_at_ms}"
+    digest = hmac.digest(secret.encode(), payload.encode(), "sha256")
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")[:32]
+
+
+def verify_capture_token(
+    token: str | None, round_id: int, participant_id: int, deadline_at_ms: int, secret: str
+) -> bool:
+    if token is None or len(token) != 32 or not token.isascii():
+        return False
+    return hmac.compare_digest(
+        capture_token(round_id, participant_id, deadline_at_ms, secret), token
+    )

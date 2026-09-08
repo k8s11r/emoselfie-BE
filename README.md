@@ -54,10 +54,11 @@ PostgreSQL은 `127.0.0.1:55432`, 조율 Redis는 `56379`, 이미지 Redis는 `56
 | `POST /api/rooms/{slug}/participants` | 멱등 입장, 12명 정원, 색상 배정 |
 | `PATCH /api/rooms/{slug}/settings` | 대기 중 방장만 변경 |
 | `GET /api/rooms/{slug}/state` | 현재 참여자만 대기실 snapshot 조회 |
+| `POST /api/rooms/{slug}/start` | 방장만, active 2명 이상일 때 게임 시작 |
 | `POST /api/rooms/{slug}/close` | 대기 중 방장만 닫기, 소유 슬롯 반환 |
 | `/socket.io` | 서명 쿠키·입장 인증, Redis 다중 서버 전파, 중복 연결 교체, presence |
 
-대기실 변경은 현재 FE가 처리할 수 있는 `room:joined` 전체 snapshot으로 갱신합니다. 게임 중 snapshot은 아직 제공하지 않으며 503을 반환합니다. `/start`는 라운드 실행기가 준비되기 전까지 노출하지 않습니다. 임시 방장·60초 이탈·방 만료 스케줄러·결과 채널은 후속 구현입니다.
+대기실 변경은 현재 FE가 처리할 수 있는 `room:joined` 전체 snapshot으로 갱신합니다. `/start`는 감정 시퀀스를 뽑아 1라운드를 공개하고 `game:started`와 참여자별 `round:revealed`(개인 촬영 토큰)를 발행합니다. 다만 제출 마감·채점·다음 라운드로 이어지는 실행기는 아직 없어 라운드는 공개 상태에 머뭅니다. 게임 중 snapshot·재접속은 여전히 503이며 임시 방장·60초 이탈·방 만료 스케줄러·결과 채널은 후속 구현입니다.
 
 ## 검증
 
@@ -77,7 +78,7 @@ MODEL_DIR=.models uv run pytest --run-model
 
 기본 pytest는 외부 서비스 없이 단위·계약 테스트를 실행하고 integration과 model은 명시적으로 건너뜁니다. `--run-model`은 실제 weight를 불러 저자 데모 이미지의 판정과 전처리 일치를 대조하므로 아티팩트가 없으면 실패합니다. 통합 테스트는 고유한 테스트 사용자·방·Redis 키만 생성하고 정리하며 전체 DB/Redis를 비우지 않습니다. DB·Redis는 고정된 로컬 개발 포트를 사용하고, 소켓 테스트는 임의의 빈 포트에 실제 Uvicorn 서버 2개를 실행한 뒤 정리합니다.
 
-2026-09-08 기준 전체 131개 테스트(단위·계약 98, 통합 26, 모델 7), Ruff lint/format, mypy, migration 적용·롤백·재적용이 통과했습니다. 실제 FE 브라우저·모바일·게임 완주 검증과 원격 CI는 아직 실행하지 않았습니다.
+2026-09-08 기준 전체 150개 테스트(단위·계약 115, 통합 28, 모델 7), Ruff lint/format, mypy, migration 적용·롤백·재적용이 통과했습니다. 실제 FE 브라우저·모바일·게임 완주 검증과 원격 CI는 아직 실행하지 않았습니다.
 
 로컬 benchmark(Apple M3, torch 1스레드, 동시성 2)에서 모델 로드는 1.41초, 단일 추론 p50은 24~30ms, 1440×1920 12장 동시 제출은 254ms였고 프로세스 RSS는 약 460MB였습니다. HTTP 업로드를 포함한 종단 측정은 아직 아닙니다. 자세한 수치는 [추적표](./docs/traceability.md)에 있습니다.
 

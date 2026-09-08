@@ -9,7 +9,7 @@ from app.core.config import Settings
 from app.db.session import create_engine, session_factory
 from app.inference.loader import load_classifier
 from app.inference.protocol import ManagedEmotionClassifier
-from app.realtime.server import LobbyRealtime
+from app.realtime.server import Realtime
 
 
 class Resources:
@@ -17,7 +17,7 @@ class Resources:
         self.settings = settings
         self.initialized = False
         self.classifier: ManagedEmotionClassifier | None = None
-        self.realtime: LobbyRealtime | None = None
+        self.realtime: Realtime | None = None
         self.engine: AsyncEngine = create_engine(settings)
         self.sessions = session_factory(self.engine)
         self.redis = Redis.from_url(
@@ -42,7 +42,7 @@ class Resources:
             if not all((await self.dependency_checks()).values()):
                 raise RuntimeError("Required backend dependencies are unavailable")
             self.initialized = True
-            self.realtime = LobbyRealtime(self)
+            self.realtime = Realtime(self)
         except BaseException:
             await self.close()
             raise

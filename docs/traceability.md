@@ -24,6 +24,9 @@
 | BE-022~024, PM-07·RO-05·06·17 | domain/room, api/rooms.py | 비참여자 차단·14명 경합·재입장·방장 설정 | REST 구현; G-05·06·임시 방장 후속 |
 | BE-026 | api/rooms.py, realtime/server.py | 대기 방 닫기·소켓 종료 | 게임 종료·잡/이미지 정리는 후속 |
 | BE-030~032, ID-07·08 | realtime/server.py, emitter.py | test_realtime.py의 실제 서버 2개 | 대기실/중복 연결 구현; viewer·game 이벤트 후속 |
+| BE-025, RD-01·02·PM-10, §9 | domain/game/emotions.py, service.py, api/rooms.py | test_emotions.py, test_realtime.py의 2 Pod 시작 흐름 | 시작·시퀀스·1라운드 공개 완료; 마감·채점 후속 |
+| BE-P1-03, EM-03 | domain/game/emotions.py | test_emotions.py | §9.2와 함께 앞당겨 구현 |
+| CP-03, §6.3 | core/security.py | test_security.py, test_realtime.py | 촬영 토큰 발급 완료; 업로드 검증은 BE-014 |
 | BE-039, §14 | domain/room/service.py, api/rooms.py | waiting snapshot·권한 테스트 | 게임 screen/replay 미구현 |
 | BE-060, §16 | core/ratelimit.py, api/deps.py | 429·Retry-After 및 소켓 ping | 방 API·presence 연결; 업로드 후속 |
 | BE-063, §8.5 | api/health.py, main.py | ready 성공/실패·자원 해제 | 부분 착수; 이미지/운영 배포 미구현 |
@@ -33,7 +36,7 @@
 전체 게임의 다중 Pod 복구, 제품 E2E, FE 브라우저 연동, 부하·모바일 베타는 실행하지 않았으며 이 결과로 완료 판정하지 않는다.
 
 2026-09-08 로컬 검증: Python 3.11.16, PostgreSQL 16.13, Redis 7.4.8, torch 2.8.0, mediapipe 0.10.35.
-단위·계약·통합·모델 합계 131개 통과(단위·계약 98, 통합 26, 모델 7). Ruff lint/format, mypy,
+단위·계약·통합·모델 합계 150개 통과(단위·계약 115, 통합 28, 모델 7). Ruff lint/format, mypy,
 `alembic check`, 초기 migration 적용→롤백→재적용 통과. 원격 PR/CI 결과는 아직 없다.
 
 BE-018 로컬 benchmark(Apple M3, 8 CPU, torch 1스레드, INFERENCE_CONCURRENCY=2):

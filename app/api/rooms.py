@@ -16,6 +16,7 @@ from app.core.errors import AppError
 from app.core.ratelimit import enforce_limit
 from app.db.models import Room
 from app.domain.enums import RoomStatus
+from app.domain.game import service as game
 from app.domain.room import service
 
 router = APIRouter(prefix="/api/rooms", tags=["rooms"])
@@ -125,6 +126,19 @@ async def lobby_state(slug: str, user: CurrentUser, runtime: Runtime) -> LobbySt
         room = await service.get_room(session, slug, lock=True)
         participant = await service.current_participant(session, room.id, user.uuid)
         return LobbyState.model_validate(await service.lobby_snapshot(session, room, participant))
+
+
+@router.post("/{slug}/start")
+async def start(slug: str, user: CurrentUser, runtime: Runtime) -> dict[str, bool]:
+    async with runtime.sessions.begin() as session:
+        # The row lock serialises a double tap and a concurrent join against one transition.
+        room = await service.get_room(session, slug, lock=True)
+        service.require_host(room, user.uuid)
+        await game.start_game(session, room)
+        room_id = room.id
+    if runtime.realtime is not None:
+        await runtime.realtime.announce_round(room_id, started=True)
+    return {"ok": True}
 
 
 @router.post("/{slug}/close")

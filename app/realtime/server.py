@@ -15,8 +15,9 @@ from app.core.errors import AppError
 from app.core.ratelimit import enforce_limit
 from app.core.redis import PRESENCE_TTL_SEC, SOCKET_TTL_SEC, room_key, socket_key, user_socket_key
 from app.core.security import COOKIE_NAME, verify_cookie
-from app.db.models import Participant, Room, User
+from app.db.models import Participant, Room, Round, User
 from app.domain.enums import ConnectionStatus, RoomStatus
+from app.domain.game import service as game
 from app.domain.room import service
 from app.realtime.emitter import Emitter
 
@@ -54,7 +55,7 @@ class SocketGateway:
         await realtime.asgi(scope, receive, send)
 
 
-class LobbyRealtime:
+class Realtime:
     def __init__(self, resources: "Resources") -> None:
         self.runtime = resources
         self.manager = socketio.AsyncRedisManager(str(resources.settings.redis_url))
@@ -196,6 +197,17 @@ class LobbyRealtime:
         except Exception:
             return AppError("SERVICE_UNAVAILABLE").socket_ack()
 
+    async def current_sid(self, participant: Participant) -> str | None:
+        value = await self.runtime.redis.get(user_socket_key(str(participant.user_id)))
+        if not value:
+            return None
+        sid = str(value.decode())
+        # A UUID may have moved to a different room. Never send the old room to that sid.
+        context = await self.runtime.redis.hgetall(socket_key(sid))
+        if not context or context.get(b"participantId") != str(participant.id).encode():
+            return None
+        return sid
+
     async def refresh_lobby(self, room_id: int) -> None:
         disconnect_sids: list[str] = []
         async with self.runtime.sessions.begin() as session:
@@ -204,13 +216,8 @@ class LobbyRealtime:
                 return
             members = await service.lobby_participants(session, room.id)
             for participant in members:
-                value = await self.runtime.redis.get(user_socket_key(str(participant.user_id)))
-                if not value:
-                    continue
-                sid = value.decode()
-                # A UUID may have moved to a different room. Never send the old room to that sid.
-                context = await self.runtime.redis.hgetall(socket_key(sid))
-                if not context or context.get(b"participantId") != str(participant.id).encode():
+                sid = await self.current_sid(participant)
+                if sid is None:
                     continue
                 if room.status == RoomStatus.CLOSED:
                     await self.emitter.personal("room:closed", sid, {"reason": "host_closed"})
@@ -221,6 +228,31 @@ class LobbyRealtime:
                     await self.emitter.personal("room:joined", sid, snapshot)
         for sid in disconnect_sids:
             await self.server.disconnect(sid)
+
+    async def announce_round(self, room_id: int, *, started: bool = False) -> None:
+        """`game:started` reaches the whole room; `round:revealed` is personal (§13.2)."""
+        async with self.runtime.sessions.begin() as session:
+            room = await session.get(Room, room_id, with_for_update=True)
+            if room is None or room.status != RoomStatus.PLAYING or room.current_round_id is None:
+                return
+            current = await session.get(Round, room.current_round_id)
+            if current is None:
+                return
+            members = await game.active_participants(session, room.id)
+            if started:
+                await self.emitter.room("game:started", room_id, game.started_view(room, members))
+            for participant in members:
+                sid = await self.current_sid(participant)
+                if sid is None:
+                    # A disconnected player restores the round through §14, not a replayed event.
+                    continue
+                await self.emitter.personal(
+                    "round:revealed",
+                    sid,
+                    game.revealed_view(
+                        room, current, participant, len(members), self.runtime.settings
+                    ),
+                )
 
     async def shutdown(self) -> None:
         await self.server.shutdown()
