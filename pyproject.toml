@@ -28,7 +28,11 @@ dev = [
 ]
 
 [project.optional-dependencies]
-inference = ["torch==2.8.0", "mediapipe==0.10.35"]
+inference = [
+  "torch==2.8.0",
+  "mediapipe==0.10.35; platform_machine != 'aarch64' or sys_platform == 'darwin'",
+  "mediapipe==1.0.1; platform_machine == 'aarch64' and sys_platform != 'darwin'",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

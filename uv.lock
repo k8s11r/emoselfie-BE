@@ -1,6 +1,10 @@
 version = 1
 revision = 3
 requires-python = "==3.11.*"
+resolution-markers = [
+    "platform_machine != 'aarch64' or sys_platform == 'darwin'",
+    "platform_machine == 'aarch64' and sys_platform != 'darwin'",
+]
 
 [[package]]
 name = "absl-py"
@@ -267,7 +271,8 @@ dependencies = [
 
 [package.optional-dependencies]
 inference = [
-    { name = "mediapipe" },
+    { name = "mediapipe", version = "0.10.35", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'aarch64' or sys_platform == 'darwin'" },
+    { name = "mediapipe", version = "1.0.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'aarch64' and sys_platform != 'darwin'" },
     { name = "torch" },
 ]
 
@@ -286,7 +291,8 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.14,<2" },
     { name = "asyncpg", specifier = ">=0.30,<1" },
     { name = "fastapi", specifier = ">=0.115,<1" },
-    { name = "mediapipe", marker = "extra == 'inference'", specifier = "==0.10.35" },
+    { name = "mediapipe", marker = "platform_machine == 'aarch64' and sys_platform != 'darwin' and extra == 'inference'", specifier = "==1.0.1" },
+    { name = "mediapipe", marker = "(platform_machine != 'aarch64' and extra == 'inference') or (sys_platform == 'darwin' and extra == 'inference')", specifier = "==0.10.35" },
     { name = "numpy", specifier = ">=2.2,<3" },
     { name = "pillow", specifier = ">=12.3,<13" },
     { name = "pydantic", specifier = ">=2.10,<3" },
@@ -608,6 +614,9 @@ wheels = [
 name = "mediapipe"
 version = "0.10.35"
 source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "platform_machine != 'aarch64' or sys_platform == 'darwin'",
+]
 dependencies = [
     { name = "absl-py" },
     { name = "certifi" },
@@ -622,6 +631,27 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/32/8f/1bc57dbc9b7b03c8f875aac23380ec57e9002cc02fe6720045fb263f3966/mediapipe-0.10.35-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:db9a579df48cffe9570cd3e93f6a5d2dd089a1103b846c60c5b5de8a21c38db0", size = 12400490, upload-time = "2026-04-27T17:45:31.848Z" },
     { url = "https://files.pythonhosted.org/packages/5b/f6/763477e9aeed98accc984ed6ee3f11a21a0c5fd1d1c6586b8d07067748ff/mediapipe-0.10.35-py3-none-win_amd64.whl", hash = "sha256:b08f001cf3c3cd0d88d9ed68f3368dc8a4913f568281a93117f083115aa672ba", size = 10905503, upload-time = "2026-04-27T17:45:33.946Z" },
     { url = "https://files.pythonhosted.org/packages/07/b3/5c7fa594c731e8dafab9f1a46ab6cef670fa62dbbfb6248cc70e42ec6fc5/mediapipe-0.10.35-py3-none-win_arm64.whl", hash = "sha256:46255326a6213118aaa518a7aa25e35f93337e82677960cc2a945f117bff8444", size = 9992331, upload-time = "2026-04-27T17:45:36.193Z" },
+]
+
+[[package]]
+name = "mediapipe"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "platform_machine == 'aarch64' and sys_platform != 'darwin'",
+]
+dependencies = [
+    { name = "absl-py" },
+    { name = "certifi" },
+    { name = "flatbuffers" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "opencv-contrib-python" },
+    { name = "sounddevice" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/16/9d/515c6ebc98db21484b2b93b7403464d08fb7861b6430752801bc75d29372/mediapipe-1.0.1-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:d6050e773dc6698eb86324090f61af1ccab28a6f1e9f77d98fe0611cef707997", size = 35841411, upload-time = "2026-08-14T18:23:58.093Z" },
+    { url = "https://files.pythonhosted.org/packages/49/47/8a901eade7352051ae4d7b0b070ad8a84bde9cbf3092afd69088982842bb/mediapipe-1.0.1-py3-none-win_arm64.whl", hash = "sha256:4bbbb3838a99f7fdcd3cb0e071560120df45ddc48c1ad097ef1457f8600e0e77", size = 17700960, upload-time = "2026-08-14T18:24:06.172Z" },
 ]
 
 [[package]]
