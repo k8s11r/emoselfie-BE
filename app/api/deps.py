@@ -1,0 +1,54 @@
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import Depends, Request
+
+from app.core.errors import AppError
+from app.core.ratelimit import enforce_limit
+from app.core.resources import Resources
+from app.db.models import User
+from app.domain.user.service import ensure_user
+
+
+def resources(request: Request) -> Resources:
+    value: Resources = request.app.state.resources
+    return value
+
+
+Runtime = Annotated[Resources, Depends(resources)]
+
+
+async def current_user(request: Request, runtime: Runtime) -> User:
+    async with runtime.sessions.begin() as session:
+        return await ensure_user(session, request.state.user_id)
+
+
+CurrentUser = Annotated[User, Depends(current_user)]
+
+
+async def returning_user(request: Request, runtime: Runtime) -> User:
+    """§6.2 needs the signed cookie for the socket handshake, so a session that did not keep
+    the cookie can never connect, restore or play. Admitting it would only strand a slot."""
+    if not request.state.authenticated:
+        raise AppError("SESSION_REQUIRED")
+    async with runtime.sessions.begin() as session:
+        return await ensure_user(session, request.state.user_id)
+
+
+ReturningUser = Annotated[User, Depends(returning_user)]
+
+
+def session_identity(request: Request) -> UUID:
+    """The cookie's UUID without touching the users table, for read-only media requests."""
+    identity: UUID = request.state.user_id
+    return identity
+
+
+SessionIdentity = Annotated[UUID, Depends(session_identity)]
+
+
+async def limit_ip(request: Request, scope: str, capacity: int, window_sec: int) -> None:
+    runtime = resources(request)
+    # Forwarded headers are not trusted here. Configure Uvicorn's trusted proxy list in Infra.
+    subject = request.client.host if request.client else "unknown"
+    await enforce_limit(runtime.redis, scope, subject, capacity=capacity, window_sec=window_sec)
