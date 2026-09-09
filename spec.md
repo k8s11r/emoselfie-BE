@@ -3,7 +3,7 @@
 **문서 버전** v1.0
 **작성** 2026-09-07
 **상태** 구현 착수 가능
-**상위 문서** [requirements.md](../emoselfie-DOCS/requirements.md) v1.0 (PRD), [DECISIONS.md](../emoselfie-DOCS/DECISIONS.md), [Backend Development Guidelines.md](../emoselfie-DOCS/development/Backend%20Development%20Guidelines.md)
+**상위 문서** [requirements.md](../emoselfie-DOCS/requirements.md) v1.0 (PRD), [DECISIONS.md](../emoselfie-DOCS/DECISIONS.md), [Backend Development Guidelines.md](./guidelines.md)
 
 ---
 
@@ -448,7 +448,7 @@ connect
 
 ```python
 payload = f"{round_id}:{participant_id}:{deadline_at_ms}"
-token   = base64url(hmac_sha256(CAPTURE_SECRET, payload))[:32]
+token = base64url(hmac_sha256(CAPTURE_SECRET, payload))[:32]
 ```
 
 - `round:revealed`를 **참여자별 개인 이벤트로** 발행하며 그 안에 담아 내린다. 방 전체 broadcast로는 보내지 않는다.
@@ -873,7 +873,7 @@ RO-12(쿠키 삭제 후 재입장)는 별도 처리가 필요 없다. 새 UUID�
 ### 11.1 라운드 점수 (SC-01)
 
 ```python
-target_score = round(probabilities[target_emotion] * 100, 1)   # 0.0 ~ 100.0
+target_score = round(probabilities[target_emotion] * 100, 1)  # 0.0 ~ 100.0
 ```
 
 ### 11.2 상태별 처리
@@ -893,23 +893,24 @@ target_score = round(probabilities[target_emotion] * 100, 1)   # 0.0 ~ 100.0
 RANK_POINTS = {1: 100, 2: 70, 3: 50}
 DEFAULT_POINTS = 30
 
+
 def finalize(subs):
     ranked = sorted(
         [s for s in subs if s.status in ("submitted", "no_face")],
-        key=lambda s: (-s.target_score, s.received_at_ms),   # SC-03: 동점은 먼저 제출한 쪽 상위
+        key=lambda s: (-s.target_score, s.received_at_ms),  # SC-03: 동점은 먼저 제출한 쪽 상위
     )
     for i, s in enumerate(ranked, start=1):
         s.rank = i
         s.rank_points = 30 if s.status == "no_face" else RANK_POINTS.get(i, DEFAULT_POINTS)
 
     scored = [s.rank_points for s in ranked]
-    avg = round(sum(scored) / len(scored)) if scored else DEFAULT_POINTS   # D-2
+    avg = round(sum(scored) / len(scored)) if scored else DEFAULT_POINTS  # D-2
 
     for s in subs:
         if s.status == "failed":
-            s.rank, s.rank_points = None, avg      # SC-05: 페널티 없음
+            s.rank, s.rank_points = None, avg  # SC-05: 페널티 없음
         elif s.status == "missed":
-            s.rank, s.rank_points = None, 0        # RD-06
+            s.rank, s.rank_points = None, 0  # RD-06
 ```
 
 - 동점 비교의 `received_at_ms`는 서버 수신 시각이다(CP-08·09).
@@ -938,10 +939,12 @@ participant.best_round_score  = max(best_round_score, target_score or 0)
 ```python
 class EmotionResult(BaseModel):
     face_detected: bool
-    probabilities: dict[EmotionLabel, float] | None   # 합 1.0, face_detected=False면 None
-    face_box: tuple[int, int, int, int] | None        # 로깅 금지 (PV-05)
+    probabilities: dict[EmotionLabel, float] | None  # 합 1.0, face_detected=False면 None
+    face_box: tuple[int, int, int, int] | None  # 로깅 금지 (PV-05)
 
-class InferenceError(Exception): ...      # 처리 실패. NO_FACE와 구분 (PRD 5.7 계약)
+
+class InferenceError(Exception): ...  # 처리 실패. NO_FACE와 구분 (PRD 5.7 계약)
+
 
 class EmotionClassifier(Protocol):
     async def classify(self, image: bytes) -> EmotionResult: ...

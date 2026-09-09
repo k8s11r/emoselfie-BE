@@ -44,7 +44,7 @@ addopts = "-ra --strict-markers"
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-extend-exclude = ["app/inference/vendor/ryumina.py"]
+extend-exclude = ["app/inference/vendor/ryumina.py", "docs/poc"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
