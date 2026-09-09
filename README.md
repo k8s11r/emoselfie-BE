@@ -100,7 +100,7 @@ GitHub Actions는 같은 명령과 초기 migration의 `downgrade base → upgra
 
 - [개발 계획](./PLAN.md): 구조, 계약 게이트, M0~M5 구현 순서 및 완료 기준
 - [TODO 리스트](./TODO.md): 우선순위·작업 크기·요구사항별 실행 체크리스트
-- [백엔드 구현 명세](../emoselfie-DOCS/development/backend/spec.md)
+- [백엔드 구현 명세](./spec.md)
 - [Backend Development Guidelines](../emoselfie-DOCS/development/Backend%20Development%20Guidelines.md)
 - [구현 계약과 미확정 항목](./docs/contracts.md): 스키마 보강, G-01~12 상태와 후속 경계
 - [요구사항 추적표](./docs/traceability.md): 구현 파일과 검증 근거

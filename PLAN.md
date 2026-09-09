@@ -1,8 +1,8 @@
 # 이모셀피 Backend 개발 계획
 
 - 작성일: 2026-09-08
-- 기준: [Backend spec v1.0](../emoselfie-DOCS/development/backend/spec.md), [PRD v1.0](../emoselfie-DOCS/requirements.md), [DECISIONS](../emoselfie-DOCS/DECISIONS.md), [Backend Guidelines](../emoselfie-DOCS/development/Backend%20Development%20Guidelines.md)
-- 실행 목록: [TODO.md](./TODO.md). FE 연동 기준: [Frontend 계획](../emoselfie-FE/PLAN.md), [Frontend 명세](../emoselfie-DOCS/development/frontend/spec.md).
+- 기준: [Backend spec v1.0](./spec.md), [PRD v1.0](../emoselfie-DOCS/requirements.md), [DECISIONS](../emoselfie-DOCS/DECISIONS.md), [Backend Guidelines](../emoselfie-DOCS/development/Backend%20Development%20Guidelines.md)
+- 실행 목록: [TODO.md](./TODO.md). FE 연동 기준: [Frontend 계획](../emoselfie-FE/PLAN.md), [Frontend 명세](../emoselfie-FE/spec.md).
 - 현황: 2026-09-08 M0 기반과 세션·방 REST·실시간 대기실을 구현했다. 실제 2개 서버에서 소켓 갱신·중복 연결 교체를 포함해 66개 테스트가 통과했다. 개별 완료 범위는 TODO 및 [추적표](./docs/traceability.md)를 따른다. 실제 모델·라운드 진행·FE 브라우저 연동 완료를 의미하지 않는다.
 - 충돌 시 PRD > DECISIONS > Guidelines를 따른다. BE spec의 D-1~D-8을 구현 기준으로 사용하되, 아래 미해결 계약을 임의로 확정한 것으로 취급하지 않는다.
 

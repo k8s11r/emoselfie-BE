@@ -1,7 +1,7 @@
 # 이모셀피 Backend TODO
 
 - 작성일: 2026-09-08
-- 기준: [개발 계획](./PLAN.md), [Backend spec](../emoselfie-DOCS/development/backend/spec.md), [PRD](../emoselfie-DOCS/requirements.md)
+- 기준: [개발 계획](./PLAN.md), [Backend spec](./spec.md), [PRD](../emoselfie-DOCS/requirements.md)
 - 상태: `[ ]` 미완료, `[x]` 구현·검증 완료. 2026-09-08 M0 기반 구현 착수. 세부 증거는 [추적표](./docs/traceability.md)를 따른다.
 - 우선순위: P0 MVP 필수, P1 후속. 크기: S 반나절 안팎, M 1~2일, L 3일 이상으로 분할 필요. 계약/모델 공급 대기와 베타 기간은 제외한 상대 추정이다.
 - `§`는 Backend spec 절 번호다. 의존성은 단계 제목과 G-ID로 표시한다. 완료 체크 시 PR·테스트 결과를 항목 아래에 기록한다.
