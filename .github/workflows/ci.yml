@@ -30,3 +30,78 @@ jobs:
           uv run alembic check
       - if: always()
         run: docker compose down
+
+  # 테스트를 통과한 커밋만 이미지가 된다. main으로 들어온 push만 ECR에 올리고,
+  # PR에서는 빌드만 해서 Dockerfile이 깨진 것을 미리 잡는다.
+  image:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: AWS 자격 증명 (OIDC, 저장된 키 없음)
+        if: env.PUBLISH == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ECR_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: ECR 로그인
+        id: ecr
+        if: env.PUBLISH == 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: 태그 결정
+        id: tags
+        run: |
+          registry='${{ steps.ecr.outputs.registry }}'
+          runtime_repo='${{ vars.ECR_REPOSITORY_RUNTIME }}'
+          models_repo='${{ vars.ECR_REPOSITORY_MODELS }}'
+          # 푸시하지 않는 빌드에는 레지스트리도 저장소 변수도 없다. 태그가 비면
+          # 빌드 자체가 실패하므로 로컬 이름으로 채운다.
+          [ -n "$registry" ] || registry='local'
+          [ -n "$runtime_repo" ] || runtime_repo='emoselfie-be'
+          [ -n "$models_repo" ] || models_repo='emoselfie-be-models'
+          echo "runtime=$registry/$runtime_repo:sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "models=$registry/$models_repo:sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      # MediaPipe가 linux/aarch64 휠을 내지 않는다. amd64 외의 플랫폼은 빌드되지 않는다.
+      - name: 런타임 이미지
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.tags.outputs.runtime }}
+          cache-from: type=gha,scope=runtime
+          cache-to: type=gha,mode=max,scope=runtime
+          provenance: false
+
+      - name: 모델 준비 이미지
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: models
+          platforms: linux/amd64
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.tags.outputs.models }}
+          cache-from: type=gha,scope=models
+          cache-to: type=gha,mode=max,scope=models
+          provenance: false
+
+      - name: 올린 이미지 기록
+        if: env.PUBLISH == 'true'
+        run: |
+          {
+            echo "### ECR에 올린 이미지"
+            echo "- \`${{ steps.tags.outputs.runtime }}\`"
+            echo "- \`${{ steps.tags.outputs.models }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
