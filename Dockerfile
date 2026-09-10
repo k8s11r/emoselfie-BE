@@ -23,8 +23,8 @@ WORKDIR /src
 COPY pyproject.toml uv.lock ./
 
 # --extra inference 가 torch와 mediapipe를 가져온다.
-# uv.lock은 x86_64 linux에서 CUDA 휠을 함께 해석하므로 이미지가 커진다.
-# CPU 인덱스 고정은 BE-063의 작업이며 lock 재생성이 필요하다.
+# pyproject의 tool.uv.sources가 linux에서 torch를 CPU 인덱스로 고정하므로
+# nvidia 패키지가 딸려오지 않는다. 그 고정을 풀면 이미지가 GB 단위로 커진다.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --extra inference
 
