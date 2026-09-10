@@ -67,3 +67,16 @@ ignore_missing_imports = true
 
 [tool.uv]
 package = false
+
+# torch는 같은 버전에 CUDA 빌드와 CPU 빌드가 따로 있다. PyPI 기본값은 Linux
+# x86_64에서 CUDA 빌드라 nvidia 패키지 14개(4.1GB)가 함께 설치되는데, 이
+# 서버는 GPU를 쓰지 않으므로 전부 사용되지 않는다. Linux에서만 CPU 인덱스를
+# 보게 한다. macOS 휠에는 애초에 CUDA가 없어 로컬 개발은 영향받지 않는다.
+# BE-063.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
