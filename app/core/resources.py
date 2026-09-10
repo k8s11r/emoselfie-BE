@@ -1,7 +1,11 @@
 import asyncio
 from contextlib import AsyncExitStack, suppress
+from typing import Any
+from urllib.parse import urlparse
 
 from redis.asyncio import Redis
+from redis.asyncio.sentinel import Sentinel
+from socketio.redis_manager import parse_redis_sentinel_url
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -16,6 +20,33 @@ from app.realtime.server import Realtime
 RECONCILE_INTERVAL_SEC = 30
 
 
+def redis_client(url: str, **options: Any) -> Any:
+    """redis:// 와 redis+sentinel:// 를 모두 받는다.
+
+    Redis.from_url 은 sentinel 스킴을 모른다. 그 경우 주소가 고정되어, failover
+    후 강등된 replica에 계속 붙어 READONLY 오류로 실패하고 재연결도 같은 주소로
+    붙어 복구되지 않는다. Sentinel.master_for 는 연결할 때마다 현재 master를
+    Sentinel에게 물어본다.
+
+    URL 파싱은 python-socketio의 것을 그대로 쓴다. AsyncRedisManager가 같은
+    함수로 같은 URL을 해석하므로 두 클라이언트가 어긋나지 않는다.
+
+    반환 타입이 Any인 것은 redis-py를 따른 것이다. Redis.from_url 자체가 Any를
+    돌려준다. 여기서 Redis로 좁히면 명령 메서드가 Awaitable[T] | T 로 풀려
+    호출부의 await 마다 mypy가 걸린다(realtime/server.py 10곳). redis-py의
+    스텁이 sync와 async를 공유하기 때문이며 이 PR에서 다룰 문제가 아니다.
+    """
+    if urlparse(url).scheme == "redis+sentinel":
+        sentinels, service_name, connection_kwargs = parse_redis_sentinel_url(url)
+        sentinel = Sentinel(  # type: ignore[no-untyped-call]
+            sentinels,
+            sentinel_kwargs=options,
+            **{**options, **connection_kwargs},
+        )
+        return sentinel.master_for(service_name)
+    return Redis.from_url(url, **options)
+
+
 class Resources:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -27,12 +58,12 @@ class Resources:
         self.reconciler: asyncio.Task[None] | None = None
         self.engine: AsyncEngine = create_engine(settings)
         self.sessions = session_factory(self.engine)
-        self.redis = Redis.from_url(
-            str(settings.redis_url),
+        self.redis = redis_client(
+            settings.redis_url,
             socket_connect_timeout=settings.dependency_timeout_sec,
             socket_timeout=settings.dependency_timeout_sec,
         )
-        self.media_redis = Redis.from_url(
+        self.media_redis = redis_client(
             str(settings.redis_media_url),
             socket_connect_timeout=settings.dependency_timeout_sec,
             socket_timeout=settings.dependency_timeout_sec,
