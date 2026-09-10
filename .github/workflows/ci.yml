@@ -1,7 +1,10 @@
 name: Backend checks
 on:
-  push:
+  # PR에 커밋이 올라올 때마다 머지 전에 검증한다.
   pull_request:
+  # main에 커밋이 들어오는 경로는 PR 머지뿐이다. 이때만 이미지를 ECR에 올린다.
+  push:
+    branches: [main]
 permissions:
   contents: read
 jobs:
