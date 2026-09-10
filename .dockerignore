@@ -15,7 +15,6 @@ htmlcov
 .claude
 docs
 tests
-scripts
 *.md
 compose.yaml
 Dockerfile
