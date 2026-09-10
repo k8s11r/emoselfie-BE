@@ -28,6 +28,23 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --extra inference
 
+# ───────────────────────── 모델 아티팩트 준비 ─────────────────────────
+# K8s의 init container와 같은 역할이다. 백엔드보다 먼저 실행되어 모델을
+# 볼륨에 놓고 끝난다. 백엔드 이미지와 분리하는 이유는 두 가지다.
+#   · 운영 이미지에 다운로드 클라이언트를 넣지 않는다 (가이드라인 §28)
+#   · 스크립트는 httpx를 쓰는데 이는 dev 의존성이라 런타임에 없다
+# 스크립트는 이미 멱등하다. 파일이 있고 sha256이 맞으면 받지 않는다.
+FROM ${PYTHON_IMAGE} AS models
+
+RUN pip install --no-cache-dir httpx==0.28.1
+
+WORKDIR /app
+COPY app/inference/artifacts.json ./app/inference/artifacts.json
+COPY scripts/prepare_models.py ./scripts/prepare_models.py
+
+ENTRYPOINT ["python", "scripts/prepare_models.py"]
+CMD ["--directory", "/models"]
+
 # ───────────────────────────────── 런타임 ─────────────────────────────────
 FROM ${PYTHON_IMAGE} AS runtime
 
