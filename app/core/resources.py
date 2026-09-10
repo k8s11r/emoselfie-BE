@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import AsyncExitStack, suppress
+from typing import Any
 from urllib.parse import urlparse
 
 from redis.asyncio import Redis
@@ -19,7 +20,7 @@ from app.realtime.server import Realtime
 RECONCILE_INTERVAL_SEC = 30
 
 
-def redis_client(url: str, **options: object) -> Redis:
+def redis_client(url: str, **options: Any) -> Any:
     """redis:// 와 redis+sentinel:// 를 모두 받는다.
 
     Redis.from_url 은 sentinel 스킴을 모른다. 그 경우 주소가 고정되어, failover
@@ -29,14 +30,20 @@ def redis_client(url: str, **options: object) -> Redis:
 
     URL 파싱은 python-socketio의 것을 그대로 쓴다. AsyncRedisManager가 같은
     함수로 같은 URL을 해석하므로 두 클라이언트가 어긋나지 않는다.
+
+    반환 타입이 Any인 것은 redis-py를 따른 것이다. Redis.from_url 자체가 Any를
+    돌려준다. 여기서 Redis로 좁히면 명령 메서드가 Awaitable[T] | T 로 풀려
+    호출부의 await 마다 mypy가 걸린다(realtime/server.py 10곳). redis-py의
+    스텁이 sync와 async를 공유하기 때문이며 이 PR에서 다룰 문제가 아니다.
     """
     if urlparse(url).scheme == "redis+sentinel":
         sentinels, service_name, connection_kwargs = parse_redis_sentinel_url(url)
-        return Sentinel(
+        sentinel = Sentinel(  # type: ignore[no-untyped-call]
             sentinels,
             sentinel_kwargs=options,
             **{**options, **connection_kwargs},
-        ).master_for(service_name)
+        )
+        return sentinel.master_for(service_name)
     return Redis.from_url(url, **options)
 
 
