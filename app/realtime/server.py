@@ -65,6 +65,14 @@ return 1
 
 class SocketGateway:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Engine.IO는 ASGI scheme 대신 이 헤더로 HTTP Origin을 비교한다.
+        scope = dict(scope)
+        scope["headers"] = [
+            (name, {b"ws": b"http", b"wss": b"https"}.get(value, value))
+            if name == b"x-forwarded-proto"
+            else (name, value)
+            for name, value in scope["headers"]
+        ]
         realtime = scope["app"].state.resources.realtime
         await realtime.asgi(scope, receive, send)
 

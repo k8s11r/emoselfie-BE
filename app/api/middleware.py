@@ -59,7 +59,7 @@ class SessionMiddleware:
                         sign_cookie(user_id, settings.cookie_secret.get_secret_value()),
                         max_age=COOKIE_MAX_AGE,
                         httponly=True,
-                        secure=True,
+                        secure=not (settings.allow_insecure_cookie and scope["scheme"] == "http"),
                         samesite="lax",
                         path="/",
                     )

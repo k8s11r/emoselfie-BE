@@ -16,7 +16,9 @@ uv run uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000 --relo
 
 `scripts/init_env.py`는 `.env.example`에서 `.env`를 만들고 독립된 서명 키 3개를 생성합니다. 기존 `.env`는 덮어쓰지 않으며 생성 파일은 Git에서 제외합니다. 로컬 DB 계정은 개발 전용입니다.
 
-위 HTTP 명령은 서버 개발·헬스체크용입니다. 브라우저 세션 연동은 FE와 BE를 같은 HTTPS 오리진에서 프록시해야 합니다. `es_uid` 쿠키는 개발에서도 `Secure; HttpOnly; SameSite=Lax`를 유지합니다. 신뢰할 프록시 주소는 Uvicorn 설정으로 제한하고 외부가 보낸 X-Forwarded-For를 직접 신뢰하지 않습니다.
+기본적으로 브라우저 세션 연동은 FE와 BE를 같은 HTTPS 오리진에서 프록시합니다. `es_uid`는 기본적으로 `Secure; HttpOnly; SameSite=Lax`를 유지합니다. 로컬 HTTP 브라우저 개발이 필요하면 `APP_ENV=development`에서만 `ALLOW_INSECURE_COOKIE=true`를 명시합니다. 이 경우에도 HTTPS 요청에는 `Secure`를 유지하며, 운영·테스트 환경에서 해당 옵션을 켜면 시작을 거부합니다.
+
+Traefik은 `/api`, `/media`, `/socket.io`, `/health`를 BE로 직접 전달할 수 있습니다. `SocketGateway`는 Engine.IO가 Origin을 검사하기 전에 `X-Forwarded-Proto`의 `ws/wss`를 `http/https`로 정규화합니다. Origin 검사는 계속 적용되며 Host의 포트를 보존해야 합니다. 쿠키 정책은 Uvicorn이 처리한 ASGI scheme을 사용합니다. 신뢰할 프록시 주소는 Uvicorn 설정으로 제한하고, TLS를 앞단에서 종료하면 Traefik의 `forwardedHeaders.trustedIPs`도 구성해야 합니다.
 
 - [Liveness](http://127.0.0.1:8000/health/live): 프로세스 응답 확인
 - [Readiness](http://127.0.0.1:8000/health/ready): DB·조율 Redis·이미지 Redis와 선택한 추론 엔진 확인

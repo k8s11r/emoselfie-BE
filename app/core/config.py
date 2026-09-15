@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     redis_media_url: RedisDsn = Field(repr=False)
     cookie_secret: SecretStr
     cookie_secret_previous: SecretStr | None = None
+    allow_insecure_cookie: bool = False
     capture_token_secret: SecretStr
     media_token_secret: SecretStr
     emotion_model_version: str = Field(default="v1", min_length=1)
@@ -66,6 +67,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_runtime(self) -> Self:
+        if self.allow_insecure_cookie and self.app_env != "development":
+            raise ValueError("Insecure cookies are restricted to development")
         if self.app_env == "production" and self.inference_backend == "fake":
             raise ValueError("Fake inference is restricted to development and test")
         if self.database_url.scheme != "postgresql+asyncpg":
