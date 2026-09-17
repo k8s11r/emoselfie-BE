@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import Field
 
 from app.core.schemas import PublicId, WireModel
-from app.domain.enums import ConnectionStatus, ParticipantStatus, RoomStatus
+from app.domain.enums import ConnectionStatus, EmotionLabel, ParticipantStatus, RoomStatus
 
 
 class NicknameInput(WireModel):
@@ -90,3 +90,14 @@ class SubmissionAccepted(WireModel):
     submission_id: PublicId
     accepted_at_ms: int
     status: Literal["processing"] = "processing"
+
+
+class EmotionScore(WireModel):
+    label: EmotionLabel
+    score: float = Field(ge=0, le=100, allow_inf_nan=False)
+
+
+class InferenceResponse(WireModel):
+    face_detected: bool
+    prediction: EmotionScore | None
+    scores: dict[EmotionLabel, float] | None

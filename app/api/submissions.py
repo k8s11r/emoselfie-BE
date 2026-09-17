@@ -11,23 +11,9 @@ from app.domain.enums import RoomStatus
 from app.domain.room import service as rooms
 from app.domain.round import service
 from app.media.images import inspect_jpeg
-from app.media.multipart import boundary_of, read_part
+from app.media.multipart import boundary_of, read_capped, read_part
 
 router = APIRouter(prefix="/api/rooms", tags=["submissions"])
-
-
-async def read_capped(request: Request, limit: int) -> bytes:
-    """§8.3 ⑥. The body never reaches a temporary file, and the cap applies while streaming."""
-    declared = request.headers.get("content-length")
-    if declared is not None and declared.isdigit() and int(declared) > limit:
-        raise AppError("PAYLOAD_TOO_LARGE")
-    body = bytearray()
-    async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > limit:
-            # A request without Content-Length is stopped the moment it crosses the limit.
-            raise AppError("PAYLOAD_TOO_LARGE")
-    return bytes(body)
 
 
 @router.post("/{slug}/rounds/{round_id}/submissions", status_code=202)

@@ -58,6 +58,7 @@ PostgreSQL은 `127.0.0.1:55432`, 조율 Redis는 `56379`, 이미지 Redis는 `56
 | `GET /api/rooms/{slug}/state` | 현재 참여자만 대기실 snapshot 조회 |
 | `POST /api/rooms/{slug}/start` | 방장만, active 2명 이상일 때 게임 시작 |
 | `POST /api/rooms/{slug}/rounds/{roundId}/submissions` | 촬영 토큰 검증·2MB 한도·중복 방어 후 202 |
+| `POST /api/inference` | 시연용 JPEG 동기 추론. 방·라운드 없이 7개 감정 점수(0~100) 응답 |
 | `GET /media/{token}` | 열람 권한자에게만 결과 사진, `private, no-store` |
 | `POST /api/rooms/{slug}/close` | 대기 중 방장만 닫기, 소유 슬롯 반환 |
 | `/socket.io` | 서명 쿠키·입장 인증, Redis 다중 서버 전파, 중복 연결 교체, presence |
@@ -67,6 +68,11 @@ PostgreSQL은 `127.0.0.1:55432`, 조율 Redis는 `56379`, 이미지 Redis는 `56
 라운드는 분산 스케줄러가 진행합니다. Pod마다 250ms 주기로 Redis ZSet을 폴링하고 ZREM 반환값으로 소유권을 정하므로 타이머는 여러 Pod에서도 한 번만 발화합니다. 마감 → 미제출 확정 → 채점 확정 → 감상 → 다음 라운드 → 최종 순위까지 서버가 스스로 넘어가며, 무효 라운드와 중단 종료도 처리합니다.
 
 사진 업로드는 `POST /api/rooms/{slug}/rounds/{roundId}/submissions`입니다. 헤더 수신 시각으로 마감을 판정하고 촬영 토큰을 1회만 인정한 뒤 202를 반환하며, 추론은 백그라운드에서 돌아 `submission:scored`로 전달됩니다. 결과 사진은 이미지 Redis에 180초 TTL로 두고 열람자별 서명 토큰이 붙은 `GET /media/{token}`으로만 열립니다. 제출하지 않은 참여자에게는 어떤 결과 이벤트도 발행되지 않습니다. 늦게 제출해 결과 화면에 늦게 합류한 참여자에게는 이미 채점된 결과를 도착 순서대로 다시 보냅니다.
+
+시연용 단일 사진 추론은 `POST /api/inference`에 `multipart/form-data`의
+`image` 필드로 JPEG을 보내면 됩니다. 응답은 `faceDetected`, 최상위 `prediction`,
+그리고 7개 감정의 0~100 `scores`를 포함합니다. 게임 제출 API와 달리 추론을
+끝낼 때까지 HTTP 요청을 유지하며, IP당 기본 1분 10회로 제한됩니다.
 
 각 서버는 60초 TTL의 생존 마커를 20초마다 갱신하고, 소켓은 그 마커가 살아 있을 때만 연결로 인정합니다. 서버가 비정상 종료하면 남은 소켓 키를 30초 주기 스윕이 죽은 것으로 판정해 정리합니다. 입장한 참여자가 60초 안에 소켓을 열지 않아도 슬롯을 반환합니다. 쿠키를 저장하지 못하는 브라우저는 소켓 인증을 통과할 수 없으므로 입장 자체를 `SESSION_REQUIRED`로 거절합니다. 두 장치가 없으면 한 사용자의 반복 입장이 방 정원을 채워 다른 사람이 `ROOM_FULL`을 받게 됩니다.
 

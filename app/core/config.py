@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     inference_timeout_sec: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     inference_queue_capacity: int = Field(default=24, ge=1)
     inference_torch_threads: int = Field(default=1, ge=1)
+    inference_api_rate_limit_per_minute: int = Field(default=10, ge=1)
     max_upload_bytes: int = Field(default=2097152, gt=0)
     max_image_pixels: int = Field(default=4194304, gt=0)
     host_grace_sec: int = Field(default=60, gt=0)

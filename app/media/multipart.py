@@ -1,9 +1,24 @@
 """Minimal in-memory multipart reader. §8.3 forbids spooling an upload to disk (PV-05)."""
 
+from fastapi import Request
+
 from app.core.errors import AppError
 
 MAX_PARTS = 8
 MAX_HEADER_BYTES = 8192
+
+
+async def read_capped(request: Request, limit: int) -> bytes:
+    """Read a request body in memory while enforcing a streaming byte limit."""
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > limit:
+        raise AppError("PAYLOAD_TOO_LARGE")
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            raise AppError("PAYLOAD_TOO_LARGE")
+    return bytes(body)
 
 
 def boundary_of(content_type: str | None) -> bytes:
