@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from app.api.errors import install_error_handlers
 from app.api.health import router as health_router
+from app.api.inference import router as inference_router
 from app.api.media import router as media_router
 from app.api.middleware import SessionMiddleware
 from app.api.rooms import router as rooms_router
@@ -30,6 +31,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_error_handlers(app)
     app.add_middleware(SessionMiddleware)
     app.include_router(health_router)
+    app.include_router(inference_router)
     app.include_router(session_router)
     app.include_router(rooms_router)
     app.include_router(submissions_router)
