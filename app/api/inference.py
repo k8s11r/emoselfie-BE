@@ -11,7 +11,29 @@ from app.media.multipart import boundary_of, read_capped, read_part
 router = APIRouter(tags=["inference"])
 
 
-@router.post("/api/inference")
+@router.post(
+    "/api/inference",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["image"],
+                        "properties": {
+                            "image": {
+                                "type": "string",
+                                "format": "binary",
+                                "description": "JPEG image, up to the configured upload limit",
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
 async def infer(request: Request, response: Response, runtime: Runtime) -> InferenceResponse:
     """Run the production emotion model directly for demonstrations and return its result."""
     settings = runtime.settings
