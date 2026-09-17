@@ -77,3 +77,13 @@ async def test_inference_api_maps_engine_failure_to_service_unavailable():
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "SERVICE_UNAVAILABLE"
+
+
+def test_inference_api_openapi_exposes_image_file_picker():
+    operation = app_with(FakeClassifier()).openapi()["paths"]["/api/inference"]["post"]
+
+    request_body = operation["requestBody"]
+    assert request_body["required"] is True
+    image = request_body["content"]["multipart/form-data"]["schema"]["properties"]["image"]
+    assert image["type"] == "string"
+    assert image["format"] == "binary"
